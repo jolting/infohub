@@ -21,32 +21,11 @@ Assistant imports; area_screens() applies it to the live registries.
 
 from __future__ import annotations
 
-import unicodedata
 from typing import Any, Iterable
 
 from .const import GROUP_AKTOREN
 
 AREA_DOMAINS = ("light", "fan", "cover")
-
-
-def font_safe(name: str) -> str:
-    """A name a display's font can draw: the clients' fonts (LVGL's
-    Montserrat) cover Latin text only, and an emoji comes out blank.
-    Symbols are dropped from a name that has words besides them
-    ("\U0001F384 Den" -> "Den"); a name of symbols only is spelled out
-    ("\U0001F384" -> "Christmas Tree")."""
-    kept = []
-    symbols = []
-    for ch in name:
-        if ord(ch) <= 0xFF or unicodedata.category(ch)[0] in "LNPZ":
-            kept.append(ch)
-        elif unicodedata.category(ch) == "So":
-            symbols.append(unicodedata.name(ch, "").title())
-        # anything else (variation selectors, joiners) is dropped
-    text = " ".join("".join(kept).split())
-    if text:
-        return text
-    return " ".join(s for s in symbols if s) or name
 
 
 def _device_name(device: Any) -> str | None:
@@ -92,7 +71,7 @@ def pick_area_entities(
                 label = _device_name(device) or entry.original_name or entry.entity_id
             else:
                 label = entry.original_name
-            picked.append((entry.entity_id, font_safe(label)))
+            picked.append((entry.entity_id, label))
     return sorted(picked, key=lambda p: p[1].lower())
 
 
@@ -115,7 +94,7 @@ def area_screens(hass: Any, area_ids: Iterable[str]) -> list[dict[str, Any]]:
         screens.append(
             {
                 "area_id": area_id,
-                "name": font_safe(area.name),
+                "name": area.name,
                 "entities": pick_area_entities(entries, devices, area_id),
             }
         )
