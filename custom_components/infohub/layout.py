@@ -165,11 +165,38 @@ def _widget_label(widget: dict[str, Any], language: str) -> str:
     return alias or widget_label(widget["type"], language)
 
 
-def layout_from_panel(panel: dict[str, Any]) -> Layout:
+def _area_screen(area: dict[str, Any]) -> Screen:
+    """One area's screen: a switch_tile over the whole grid, its rows
+    limited to the area's entities via options["entities"] (the client
+    shows only those, not the whole aktoren group)."""
+    return Screen(
+        id=f"area_{area['area_id']}",
+        label=area["name"],
+        icon="mdi:sofa",
+        grid_cols=GRID_COLS,
+        grid_rows=GRID_ROWS,
+        widgets=(
+            Widget(
+                id=f"area_{area['area_id']}_switches",
+                type=WIDGET_SWITCH_TILE,
+                pos=WidgetPosition(col=1, row=1, colspan=GRID_COLS - 2, rowspan=GRID_ROWS - 2),
+                label=area["name"],
+                data_source={"group": GROUP_AKTOREN},
+                options={"entities": [entity_id for entity_id, _ in area["entities"]]},
+            ),
+        ),
+    )
+
+
+def layout_from_panel(
+    panel: dict[str, Any], area_screens: tuple[dict[str, Any], ...] | list = ()
+) -> Layout:
     """Builds the wire-protocol Layout from a panel's stored widget list.
 
-    There is still only ever one real screen ("overview") - a panel's
-    `widgets` list *is* that screen's content. Each widget's data_source
+    The "overview" screen is the panel's `widgets` list; it is left out
+    when the list is empty and the panel has area screens. Each of
+    `area_screens` (areas.area_screens(): the panel's `areas`, resolved)
+    follows as a screen of its own, swiped through on the display. Each widget's data_source
     and display label are derived from its type via widgets.widget_label()/
     _TYPE_TO_GROUP (or a user-set `alias`, see _widget_label()), not
     stored per-instance, since those are inherent to the type, not
@@ -198,6 +225,11 @@ def layout_from_panel(panel: dict[str, Any]) -> Layout:
         grid_rows=GRID_ROWS,
         widgets=widgets,
     )
+    screens = tuple(_area_screen(a) for a in area_screens)
+    if widgets or not screens:
+        screens = (screen,) + screens
     return Layout(
-        screens=(screen,), navigation=Navigation(order=(screen.id,)), language=language
+        screens=screens,
+        navigation=Navigation(order=tuple(s.id for s in screens)),
+        language=language,
     )

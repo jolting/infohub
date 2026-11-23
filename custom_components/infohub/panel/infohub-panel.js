@@ -43,6 +43,9 @@ const STRINGS = {
     defaultPanelLabel: "Standard-Panel (Fallback für nicht zugeordnete Displays)",
     assignedDevice: "Zugeordnetes Display",
     displayLanguage: "Display-Sprache",
+    areasHeading: "Räume",
+    areasHint: "Jeder gewählte Bereich wird ein eigener Bildschirm mit seinen Lichtern, Ventilatoren und Rollläden, in der Reihenfolge der Auswahl; auf dem Display wischen.",
+    noAreas: "Keine Bereiche in Home Assistant.",
     loading: "Lädt…",
     noDeviceConnected: "Noch kein Display verbunden",
     noFixedDevice: "— kein festes Gerät (Standard-Panel) —",
@@ -91,6 +94,9 @@ const STRINGS = {
     defaultPanelLabel: "Default panel (fallback for unassigned displays)",
     assignedDevice: "Assigned display",
     displayLanguage: "Display language",
+    areasHeading: "Rooms",
+    areasHint: "Each area picked becomes a screen of its own with its lights, fans and covers, in the order picked; swipe between them on the display.",
+    noAreas: "No areas in Home Assistant.",
     loading: "Loading…",
     noDeviceConnected: "No display connected yet",
     noFixedDevice: "— no fixed device (default panel) —",
@@ -406,6 +412,48 @@ class InfohubPanel extends HTMLElement {
       language,
     });
     this._panels[updated.id] = updated;
+  }
+
+  async _setAreas(panelId, areas) {
+    const updated = await this._call("infohub/panel/update", {
+      panel_id: panelId,
+      areas,
+    });
+    this._panels[updated.id] = updated;
+  }
+
+  _renderAreas(panel) {
+    const t = STRINGS[this._lang()];
+    const wrap = this.querySelector("#edit-areas");
+    if (!wrap) return;
+    const all = Object.values((this._hass && this._hass.areas) || {}).sort((a, b) =>
+      (a.name || a.area_id).localeCompare(b.name || b.area_id)
+    );
+    if (!all.length) {
+      wrap.innerHTML = `<span class="hint">${t.noAreas}</span>`;
+      return;
+    }
+    const picked = panel.areas || [];
+    wrap.innerHTML = all
+      .map((a) => {
+        const index = picked.indexOf(a.area_id);
+        return `
+      <label class="hint" style="margin-right:16px; white-space:nowrap;">
+        <input type="checkbox" data-area="${_escapeAttr(a.area_id)}" ${index >= 0 ? "checked" : ""} />
+        ${_escape(a.name || a.area_id)}${index >= 0 ? ` (${index + 1})` : ""}
+      </label>`;
+      })
+      .join("");
+    wrap.querySelectorAll("[data-area]").forEach((box) => {
+      box.addEventListener("change", async (ev) => {
+        const current = (this._panels[panel.id].areas || []).filter(
+          (id) => id !== box.dataset.area
+        );
+        if (ev.target.checked) current.push(box.dataset.area);
+        await this._setAreas(panel.id, current);
+        this._renderAreas(this._panels[panel.id]);
+      });
+    });
   }
 
   async _loadKnownDevices() {
@@ -834,6 +882,10 @@ class InfohubPanel extends HTMLElement {
         </label>
       </div>
 
+      <h3>${t.areasHeading}</h3>
+      <div class="hint" style="margin-bottom:8px;">${t.areasHint}</div>
+      <div id="edit-areas" style="margin-bottom:16px;"></div>
+
       <h3>${t.widgetsHeading}</h3>
       <div class="widget-palette" id="widget-palette"></div>
       <div id="grid-wrap"></div>
@@ -850,6 +902,7 @@ class InfohubPanel extends HTMLElement {
       this._setLanguage(panel.id, ev.target.value);
     });
     this._populateDeviceSelect(panel);
+    this._renderAreas(panel);
 
     const palette = editor.querySelector("#widget-palette");
     palette.innerHTML = Object.entries(WIDGET_CATALOG)

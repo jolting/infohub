@@ -64,6 +64,12 @@ Home Assistant
 - **Multiple panels, multiple displays**: define as many named panel
   layouts as you like and assign each physical display to one via a
   dropdown, keyed off a stable per-device ID.
+- **Rooms**: pick Home Assistant areas for a panel and each becomes a
+  screen of its own, swiped through on the display, with that area's
+  lights, fans and covers as toggles (per device only its main entity,
+  so a light's segment sub-lights stay off; switches are left out, as
+  an area's plugs may be anything). It follows Home Assistant's area
+  assignments: a light moved into an area shows up there by itself.
 - **Push-based data**: entity changes are read straight from
   `hass.states` and pushed live - no REST polling loop.
 - **Google Calendar** via Home Assistant's own Google Calendar

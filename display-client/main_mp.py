@@ -1014,6 +1014,7 @@ class InfoHubDisplay:
         self._page_dots = []
         self._swipe_start_x = 0
         self._swipe_start_y = 0
+        self._swipe_hooked = False
 
         # Reminder overlay refs
         self._reminder_dim = None
@@ -1081,7 +1082,14 @@ class InfoHubDisplay:
                     elif ev_code == _ABS_Y:
                         self._touch_y = value
                 elif ev_type == _EV_KEY and ev_code == _BTN_TOUCH:
-                    self._touch_pressed = bool(value)
+                    pressed = bool(value)
+                    if pressed and not self._touch_pressed:
+                        self._swipe_start_x = self._touch_x
+                        self._swipe_start_y = self._touch_y
+                    elif not pressed and self._touch_pressed:
+                        self._check_swipe(self._touch_x - self._swipe_start_x,
+                                          self._touch_y - self._swipe_start_y)
+                    self._touch_pressed = pressed
         except Exception as e:
             print("Touch read error:", e)
 
@@ -1206,9 +1214,29 @@ class InfoHubDisplay:
             self._page_dots.append(dot)
 
     def _setup_swipe_detection(self):
-        """Set up swipe gesture detection on screen."""
+        """Set up swipe gesture detection on screen. With our own touch
+        reader (init_touch()) swipes are seen there instead, wherever
+        they start: a press on a card never reaches self.scr, and on a
+        small screen the cards cover most of it."""
+        if self._swipe_hooked:
+            return
+        self._swipe_hooked = True
+        if getattr(self, "_touch_file", None) is not None:
+            return
         self.scr.add_event_cb(self._on_swipe_press, lv.EVENT.PRESSED, None)
         self.scr.add_event_cb(self._on_swipe_release, lv.EVENT.RELEASED, None)
+
+    def _check_swipe(self, dx, dy):
+        """A finger lifted dx/dy from where it went down: a sideways move
+        of more than 100 px is a swipe to the next/previous screen. The
+        page changes from a timer, outside LVGL's input read."""
+        if len(self._layout_screen_ids) < 2:
+            return
+        if abs(dx) <= 100 or abs(dx) <= abs(dy):
+            return
+        page = self._current_page + (1 if dx < 0 else -1)
+        timer = lv.timer_create(lambda t: self._switch_page(page), 0, None)
+        timer.set_repeat_count(1)
 
     def _on_swipe_press(self, event):
         """Record touch start position."""
@@ -2354,11 +2382,16 @@ class InfoHubDisplay:
         """Actuator widget: shows every entity in the "aktoren" group, one
         per row, each with a tappable lv.switch instead of a read-only
         value - same on-demand row lifecycle as _setup_value_tile_card(),
-        see update_aktoren().
+        see update_aktoren(). options["entities"], when set (an area's
+        screen, see the integration's areas.py), limits it to those.
         """
         options = options or {}
         card_w = options.get("_card_w") or 300
-        self._switch_tiles.append({"card": card, "card_w": card_w, "rows": {}})
+        only = options.get("entities")
+        self._switch_tiles.append({
+            "card": card, "card_w": card_w, "rows": {},
+            "only": set(only) if only is not None else None,
+        })
 
     def _setup_clock_card(self, card, options=None):
         """Set up the standalone digital clock card (7-segment digits + date).
@@ -3936,14 +3969,18 @@ class InfoHubDisplay:
             # lv.switch()-based rows - this row's touch target (and the
             # rocker-switch visual) needs more vertical room.
             row_h = 70
-            items = sorted(data.items(), key=lambda kv: kv[1].get("label", kv[0]))
+            all_items = sorted(data.items(), key=lambda kv: kv[1].get("label", kv[0]))
             for tile in self._switch_tiles:
                 card = tile["card"]
                 rows = tile["rows"]
                 card_w = tile["card_w"]
+                only = tile.get("only")
+                items = all_items if only is None else [
+                    kv for kv in all_items if kv[0] in only]
+                shown = set(kv[0] for kv in items)
 
                 for entity_id in list(rows.keys()):
-                    if entity_id not in data:
+                    if entity_id not in shown:
                         self._delete_aktor_row(rows.pop(entity_id))
 
                 for i, (entity_id, entity_data) in enumerate(items):

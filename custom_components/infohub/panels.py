@@ -51,6 +51,9 @@ CREATE_FIELDS: dict = {
     vol.Optional("widgets", default=list): list,
     vol.Optional("assigned_device_id", default=None): vol.Any(None, str),
     vol.Optional("language", default=DEFAULT_LANGUAGE): vol.In(LANGUAGE_CHOICES),
+    # Home Assistant area ids, one screen each after the widgets' (see
+    # areas.py)
+    vol.Optional("areas", default=list): [str],
 }
 
 # UPDATE_FIELDS: no defaults, so a field the frontend didn't send stays
@@ -64,6 +67,7 @@ UPDATE_FIELDS: dict = {
     vol.Optional("widgets"): list,
     vol.Optional("assigned_device_id"): vol.Any(None, str),
     vol.Optional("language"): vol.In(LANGUAGE_CHOICES),
+    vol.Optional("areas"): [str],
 }
 
 
@@ -168,7 +172,7 @@ async def async_setup_panel_collection(
     else:
         for panel in existing:
             migration: dict[str, Any] = {}
-            if not panel.get("widgets"):
+            if not panel.get("widgets") and not panel.get("areas"):
                 migration["widgets"] = DEFAULT_WIDGETS
             if not panel.get("language"):
                 migration["language"] = "de"

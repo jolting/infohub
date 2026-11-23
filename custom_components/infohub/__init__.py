@@ -30,7 +30,13 @@ from homeassistant.components.frontend import async_remove_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import collection
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_call_later
+
+from .areas import area_entity_configs, area_screens
 
 from .const import (
     CONF_CALENDAR_ENTITY_ID,
@@ -69,10 +75,6 @@ PANEL_JS_URL = "/api/infohub/panel.js"
 PANEL_JS_FILE = Path(__file__).parent / "panel" / "infohub-panel.js"
 
 
-def _build_layouts(panels: list[dict]) -> dict[str, object]:
-    return {panel["id"]: layout_from_panel(panel) for panel in panels}
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up InfoHub from a config entry."""
     port = entry.options.get(CONF_WS_PORT, entry.data.get(CONF_WS_PORT, DEFAULT_WS_PORT))
@@ -81,7 +83,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     panels = panel_collection.async_items()
     default_panel = get_default_panel(panels)
     default_panel_id = default_panel["id"] if default_panel else None
-    entity_groups = build_entity_groups(union_panel_entities(panels))
+
+    def _expanded(panels: list[dict]) -> list[tuple[dict, list[dict]]]:
+        """Each panel with its areas resolved to screens (areas.py), and
+        those screens' entities added to the panel's own."""
+        out = []
+        for panel in panels:
+            screens = area_screens(hass, panel.get("areas") or [])
+            entities = list(panel.get("entities", [])) + area_entity_configs(screens)
+            out.append(({**panel, "entities": entities}, screens))
+        return out
+
+    def _build_layouts(panels: list[dict]) -> dict[str, object]:
+        return {p["id"]: layout_from_panel(p, screens) for p, screens in _expanded(panels)}
+
+    def _all_entities(panels: list[dict]) -> list[dict]:
+        return union_panel_entities([p for p, _ in _expanded(panels)])
+
+    entity_groups = build_entity_groups(_all_entities(panels))
 
     def _resolve_panel(device_id: str | None) -> str | None:
         # Frisch aus der Collection lesen statt eine Kopie einzufangen,
@@ -95,7 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Schaden (kein beliebiger Service-Call auf x-beliebige Entities).
         allowed_ids = {
             e["entity_id"]
-            for e in union_panel_entities(panel_collection.async_items())
+            for e in _all_entities(panel_collection.async_items())
             if e.get("group") == GROUP_AKTOREN
         }
         if entity_id not in allowed_ids:
@@ -182,26 +201,75 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await coordinator.async_start()
 
-    async def _on_panels_changed(change_type: str, item_id: str, item: dict) -> None:
-        """Re-applies layouts/entities for all panels, live.
+    last_layouts: dict[str, object] = {
+        pid: layout.as_dict() for pid, layout in _build_layouts(panels).items()
+    }
 
-        collection.notify_changes() awaits every registered listener via
+    async def _refresh(only_if_changed: bool = False) -> None:
+        """Re-applies layouts/entities for all panels, live. With
+        only_if_changed, nothing is resent unless a layout changed: a
+        display rebuilds (and goes back to its first screen) on every
+        layout it gets."""
+        current_panels = panel_collection.async_items()
+        layouts = _build_layouts(current_panels)
+        as_dicts = {pid: layout.as_dict() for pid, layout in layouts.items()}
+        if only_if_changed and as_dicts == last_layouts:
+            return
+        last_layouts.clear()
+        last_layouts.update(as_dicts)
+        current_default = get_default_panel(current_panels)
+        await server.refresh_layouts(
+            layouts,
+            current_default["id"] if current_default else None,
+            _resolve_panel,
+        )
+        await coordinator.async_apply_entities(build_entity_groups(_all_entities(current_panels)))
+
+    async def _on_panels_changed(change_type: str, item_id: str, item: dict) -> None:
+        """collection.notify_changes() awaits every registered listener via
         asyncio.gather() - it must be a coroutine function, not a plain
         @callback (that crashed with "An asyncio.Future, a coroutine or
         an awaitable is required" the moment a panel was actually edited).
         """
-        current_panels = panel_collection.async_items()
-        current_default = get_default_panel(current_panels)
-        await server.refresh_layouts(
-            _build_layouts(current_panels),
-            current_default["id"] if current_default else None,
-            _resolve_panel,
-        )
-        await coordinator.async_apply_entities(
-            build_entity_groups(union_panel_entities(current_panels))
-        )
+        await _refresh()
 
     unsub_panels = panel_collection.async_add_listener(_on_panels_changed)
+
+    # Area screens follow Home Assistant's area assignments: an entity,
+    # device or area changed re-resolves them, a couple of seconds after
+    # the last change (renaming or moving several things in a row is
+    # one refresh).
+    pending_refresh: list = [None]
+
+    async def _registry_refresh(_now) -> None:
+        pending_refresh[0] = None
+        await _refresh(only_if_changed=True)
+
+    @callback
+    def _on_registry_updated(event) -> None:
+        if not any(p.get("areas") for p in panel_collection.async_items()):
+            return
+        if pending_refresh[0] is not None:
+            pending_refresh[0]()
+        pending_refresh[0] = async_call_later(hass, 2, _registry_refresh)
+
+    unsub_registries = [
+        hass.bus.async_listen(event_type, _on_registry_updated)
+        for event_type in (
+            er.EVENT_ENTITY_REGISTRY_UPDATED,
+            dr.EVENT_DEVICE_REGISTRY_UPDATED,
+            ar.EVENT_AREA_REGISTRY_UPDATED,
+        )
+    ]
+
+    @callback
+    def _unsub_registries() -> None:
+        for unsub in unsub_registries:
+            unsub()
+        if pending_refresh[0] is not None:
+            pending_refresh[0]()
+
+    entry.async_on_unload(_unsub_registries)
 
     collection.DictStorageCollectionWebsocket(
         panel_collection, WS_API_PREFIX, WS_MODEL_NAME, CREATE_FIELDS, UPDATE_FIELDS
