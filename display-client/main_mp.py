@@ -374,9 +374,137 @@ def _format_waste_date(date_str):
         return str(date_str)
 
 
+# The fonts labels use, by size. LVGL's built-in Montserrat covers ASCII
+# and LVGL's symbols only; init_unicode_fonts() swaps in Montserrat
+# loaded from a TTF, with color emoji behind it, when those files are
+# installed next to this script.
+FONT = {
+    14: lv.font_montserrat_14,
+    16: lv.font_montserrat_16,
+    24: lv.font_montserrat_24,
+}
+# The TTF, its emoji, and the emoji's height for each text size
+# (emoji-HEIGHT.bin, made by the R1 build's mkemoji.py from Twemoji:
+# a little taller than the text, as emoji are drawn).
+UNICODE_FONT = "fonts/Montserrat-Medium.ttf"
+EMOJI_DIR = "emoji"
+EMOJI_HEIGHT = {14: 16, 16: 18, 24: 26}
+_UNICODE = False
+_unicode_keep = []  # the TTF data, fonts and callbacks LVGL holds
+
+
+class _EmojiPack:
+    """One emoji-HEIGHT.bin: an index of code points, then each image as
+    raw ARGB8888, read on first use (see mkemoji.py for the format)."""
+
+    def __init__(self, path):
+        self.f = open(path, "rb")
+        hdr = self.f.read(12)
+        if hdr[:4] != b"EMJ1":
+            raise ValueError("not an emoji pack: " + path)
+        self.h = ustruct.unpack("<H", hdr[4:6])[0]
+        n = ustruct.unpack("<I", hdr[8:12])[0]
+        idx = self.f.read(12 * n)
+        self.index = {}
+        for i in range(n):
+            cp, off, w, _ = ustruct.unpack("<IIHH", idx[12 * i:12 * i + 12])
+            self.index[cp] = (off, w)
+        self.cache = {}
+
+    def image(self, cp):
+        hit = self.cache.get(cp)
+        if hit is not None:
+            return hit[0]
+        entry = self.index.get(cp)
+        if entry is None:
+            return None
+        off, w = entry
+        self.f.seek(off)
+        data = self.f.read(w * self.h * 4)
+        dsc = lv.image_dsc_t({
+            "header": {"magic": lv.IMAGE_HEADER_MAGIC,
+                       "cf": lv.COLOR_FORMAT.ARGB8888,
+                       "w": w, "h": self.h, "stride": w * 4},
+            "data_size": len(data),
+            "data": data,
+        })
+        self.cache[cp] = (dsc, data)
+        return dsc
+
+
+def init_unicode_fonts(base_dir):
+    """After lv.init(): Montserrat from base_dir/UNICODE_FONT for every
+    size in FONT (accents, Cyrillic, ...), falling back to the emoji in
+    base_dir/EMOJI_DIR, then to the built-in font for LVGL's symbols.
+    Without the TTF nothing changes."""
+    global _UNICODE
+    try:
+        ttf_data = open(base_dir + "/" + UNICODE_FONT, "rb").read()
+    except OSError:
+        return
+    _unicode_keep.append(ttf_data)
+    for size in list(FONT):
+        builtin = FONT[size]
+        ttf = lv.tiny_ttf_create_data(ttf_data, len(ttf_data), size)
+        last = ttf
+        try:
+            pack = _EmojiPack("%s/%s/emoji-%d.bin" % (base_dir, EMOJI_DIR, EMOJI_HEIGHT[size]))
+
+            def path_cb(font, unicode, unicode_next, offset_y, user_data, pack=pack):
+                return pack.image(unicode)
+
+            emoji = lv.imgfont_create(pack.h, path_cb, None)
+            ttf.fallback = emoji
+            last = emoji
+            _unicode_keep.append((pack, path_cb, emoji))
+        except (OSError, ValueError, KeyError) as e:
+            print("No emoji for size", size, e)
+        last.fallback = builtin
+        _unicode_keep.append(ttf)
+        FONT[size] = ttf
+    _UNICODE = True
+    print("Unicode fonts loaded")
+
+
+# Not drawn, and no font has them: the emoji presentation selector and
+# joiner (a joined emoji shows as its parts), and skin tones.
+_INVISIBLE = ("\ufe0f", "\ufe0e", "\u200d",
+              "\U0001F3FB", "\U0001F3FC", "\U0001F3FD", "\U0001F3FE", "\U0001F3FF")
+
+
+def _join_surrogates(t):
+    """JSON escapes a character past U+FFFF as a UTF-16 pair
+    ("\\ud83c\\udf84" for U+1F384), and MicroPython's json leaves the
+    two halves apart: join them into the character."""
+    for c in t:
+        if 0xD800 <= ord(c) <= 0xDFFF:
+            break
+    else:
+        return t
+    out = []
+    hi = 0
+    for c in t:
+        o = ord(c)
+        if 0xD800 <= o <= 0xDBFF:
+            hi = o
+            continue
+        if 0xDC00 <= o <= 0xDFFF and hi:
+            out.append(chr(0x10000 + ((hi - 0xD800) << 10) + (o - 0xDC00)))
+        elif not 0xDC00 <= o <= 0xDFFF:
+            out.append(c)
+        hi = 0
+    return "".join(out)
+
+
 def _safe_text(text):
-    """Replace German umlauts for LVGL Montserrat font."""
+    """Text the fonts can draw: without init_unicode_fonts(), German
+    umlauts spelled out (the built-in Montserrat has none)."""
     t = str(text)
+    if _UNICODE:
+        t = _join_surrogates(t)
+        for ch in _INVISIBLE:
+            t = t.replace(ch, "")
+        return t
     for old, new in [("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"),
                      ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue")]:
         t = t.replace(old, new)
@@ -702,7 +830,7 @@ def draw_weather_icon(parent, condition, size):
         lbl = lv.label(container)
         lbl.set_text("?")
         lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        lbl.set_style_text_font(lv.font_montserrat_24, 0)
+        lbl.set_style_text_font(FONT[24], 0)
         lbl.align(lv.ALIGN.CENTER, 0, 0)
 
     return container
@@ -1141,13 +1269,13 @@ class InfoHubDisplay:
         title = lv.label(header)
         title.set_text("InfoHub")
         title.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        title.set_style_text_font(lv.font_montserrat_24, 0)
+        title.set_style_text_font(FONT[24], 0)
         title.align(lv.ALIGN.LEFT_MID, 30, 0)
 
         self.status_label = lv.label(header)
         self.status_label.set_text(_t("connecting"))
         self.status_label.set_style_text_color(lv.color_hex(THEME["warning"]), 0)
-        self.status_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.status_label.set_style_text_font(FONT[16], 0)
         self.status_label.align(lv.ALIGN.RIGHT_MID, -30, 0)
 
     def _create_gradient_background(self):
@@ -1318,9 +1446,9 @@ class InfoHubDisplay:
         card.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
 
         title_label = lv.label(card)
-        title_label.set_text(title)
+        title_label.set_text(_safe_text(title))
         title_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        title_label.set_style_text_font(lv.font_montserrat_14, 0)
+        title_label.set_style_text_font(FONT[14], 0)
         title_label.align(lv.ALIGN.TOP_LEFT, 15, 15)
 
         return card
@@ -1571,7 +1699,7 @@ class InfoHubDisplay:
         self.weather_temp_label = lv.label(card)
         self.weather_temp_label.set_text("-- C")
         self.weather_temp_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.weather_temp_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.weather_temp_label.set_style_text_font(FONT[24], 0)
         self.weather_temp_label.set_pos(30, 45)
         self.weather_temp_label.set_style_transform_scale(576, 0)
         self.weather_temp_label.set_style_transform_pivot_x(0, 0)
@@ -1591,13 +1719,13 @@ class InfoHubDisplay:
         gts_header = lv.label(card)
         gts_header.set_text("GTS")
         gts_header.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        gts_header.set_style_text_font(lv.font_montserrat_14, 0)
+        gts_header.set_style_text_font(FONT[14], 0)
         gts_header.set_pos(420, 38)
 
         self.gts_label = lv.label(card)
         self.gts_label.set_text("--")
         self.gts_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.gts_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.gts_label.set_style_text_font(FONT[24], 0)
         self.gts_label.set_pos(420, 55)
 
         self.gts_estimate_label = lv.label(card)
@@ -1605,14 +1733,14 @@ class InfoHubDisplay:
         self.gts_estimate_label.set_style_text_color(
             lv.color_hex(THEME["text_secondary"]), 0)
         self.gts_estimate_label.set_style_text_font(
-            lv.font_montserrat_14, 0)
+            FONT[14], 0)
         self.gts_estimate_label.set_pos(420, 83)
 
         # Condition text
         self.weather_cond_label = lv.label(card)
         self.weather_cond_label.set_text("--")
         self.weather_cond_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.weather_cond_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.weather_cond_label.set_style_text_font(FONT[24], 0)
         self.weather_cond_label.set_pos(30, 120)
         self.weather_cond_label.set_style_transform_scale(320, 0)
         self.weather_cond_label.set_style_transform_pivot_x(0, 0)
@@ -1659,12 +1787,12 @@ class InfoHubDisplay:
             lbl = lv.label(card)
             lbl.set_text(label_text + ":")
             lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-            lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            lbl.set_style_text_font(FONT[14], 0)
             lbl.set_pos(left_x, y)
             val = lv.label(card)
             val.set_text(default)
             val.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            val.set_style_text_font(lv.font_montserrat_16, 0)
+            val.set_style_text_font(FONT[16], 0)
             val.set_pos(left_x + 130, y)
             self.weather_detail_labels[key] = val
 
@@ -1673,12 +1801,12 @@ class InfoHubDisplay:
             lbl = lv.label(card)
             lbl.set_text(label_text + ":")
             lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-            lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            lbl.set_style_text_font(FONT[14], 0)
             lbl.set_pos(right_x, y)
             val = lv.label(card)
             val.set_text(default)
             val.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            val.set_style_text_font(lv.font_montserrat_16, 0)
+            val.set_style_text_font(FONT[16], 0)
             val.set_pos(right_x + 130, y)
             self.weather_detail_labels[key] = val
 
@@ -1697,7 +1825,7 @@ class InfoHubDisplay:
         self.weather_warning_label = lv.label(self.weather_warning_bar)
         self.weather_warning_label.set_text("")
         self.weather_warning_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.weather_warning_label.set_style_text_font(lv.font_montserrat_14, 0)
+        self.weather_warning_label.set_style_text_font(FONT[14], 0)
         self.weather_warning_label.align(lv.ALIGN.LEFT_MID, 15, 0)
 
         # === Integrated Forecast Section ===
@@ -1713,7 +1841,7 @@ class InfoHubDisplay:
         forecast_header = lv.label(card)
         forecast_header.set_text(_t("forecast"))
         forecast_header.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        forecast_header.set_style_text_font(lv.font_montserrat_14, 0)
+        forecast_header.set_style_text_font(FONT[14], 0)
         forecast_header.set_pos(20, 492)
 
         self.forecast_cols = []
@@ -1728,7 +1856,7 @@ class InfoHubDisplay:
             day_lbl = lv.label(card)
             day_lbl.set_text("--")
             day_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            day_lbl.set_style_text_font(lv.font_montserrat_16, 0)
+            day_lbl.set_style_text_font(FONT[16], 0)
             day_lbl.set_pos(col_x + 50 - 12, 515)
             col["day"] = day_lbl
 
@@ -1745,14 +1873,14 @@ class InfoHubDisplay:
             temp_lbl = lv.label(card)
             temp_lbl.set_text("--/-- C")
             temp_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            temp_lbl.set_style_text_font(lv.font_montserrat_16, 0)
+            temp_lbl.set_style_text_font(FONT[16], 0)
             temp_lbl.set_pos(col_x + 50 - 30, 635)
             col["temp"] = temp_lbl
 
             precip_lbl = lv.label(card)
             precip_lbl.set_text("--%")
             precip_lbl.set_style_text_color(lv.color_hex(THEME["rain_blue"]), 0)
-            precip_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            precip_lbl.set_style_text_font(FONT[14], 0)
             precip_lbl.set_pos(col_x + 50 - 15, 660)
             col["precip"] = precip_lbl
 
@@ -1761,7 +1889,7 @@ class InfoHubDisplay:
         self.forecast_fallback_label = lv.label(card)
         self.forecast_fallback_label.set_text(_t("no_forecast"))
         self.forecast_fallback_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.forecast_fallback_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.forecast_fallback_label.set_style_text_font(FONT[16], 0)
         self.forecast_fallback_label.set_pos(150, 580)
         self.forecast_fallback_label.add_flag(lv.obj.FLAG.HIDDEN)
 
@@ -2079,7 +2207,7 @@ class InfoHubDisplay:
         self.raumklima_index_label.set_text("--")
         self.raumklima_index_label.set_style_text_color(
             lv.color_hex(THEME["success"]), 0)
-        self.raumklima_index_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.raumklima_index_label.set_style_text_font(FONT[24], 0)
         self.raumklima_index_label.set_width(200)
         self.raumklima_index_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
         self.raumklima_index_label.set_pos(180, 115)
@@ -2088,7 +2216,7 @@ class InfoHubDisplay:
         comfort_hint.set_text(_t("comfort"))
         comfort_hint.set_style_text_color(
             lv.color_hex(THEME["text_secondary"]), 0)
-        comfort_hint.set_style_text_font(lv.font_montserrat_14, 0)
+        comfort_hint.set_style_text_font(FONT[14], 0)
         comfort_hint.set_width(200)
         comfort_hint.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
         comfort_hint.set_pos(180, 148)
@@ -2107,13 +2235,13 @@ class InfoHubDisplay:
         temp_header = lv.label(card)
         temp_header.set_text(_t("temperature"))
         temp_header.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        temp_header.set_style_text_font(lv.font_montserrat_14, 0)
+        temp_header.set_style_text_font(FONT[14], 0)
         temp_header.set_pos(60, 220)
 
         self.indoor_temp_label = lv.label(card)
         self.indoor_temp_label.set_text("-- C")
         self.indoor_temp_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.indoor_temp_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.indoor_temp_label.set_style_text_font(FONT[24], 0)
         self.indoor_temp_label.set_pos(60, 248)
 
         # Vertical separator between columns
@@ -2130,13 +2258,13 @@ class InfoHubDisplay:
         hum_header = lv.label(card)
         hum_header.set_text(_t("humidity"))
         hum_header.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        hum_header.set_style_text_font(lv.font_montserrat_14, 0)
+        hum_header.set_style_text_font(FONT[14], 0)
         hum_header.set_pos(310, 220)
 
         self.indoor_hum_label = lv.label(card)
         self.indoor_hum_label.set_text("-- %")
         self.indoor_hum_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.indoor_hum_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.indoor_hum_label.set_style_text_font(FONT[24], 0)
         self.indoor_hum_label.set_pos(310, 248)
 
     # ------------------------------------------------------------------
@@ -2183,13 +2311,13 @@ class InfoHubDisplay:
         self.power_value_label = lv.label(card)
         self.power_value_label.set_text("-- W")
         self.power_value_label.set_style_text_color(lv.color_hex(THEME["success"]), 0)
-        self.power_value_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.power_value_label.set_style_text_font(FONT[24], 0)
         self.power_value_label.set_pos(310, 90)
 
         self.power_hint_label = lv.label(card)
         self.power_hint_label.set_text(_t("current_power"))
         self.power_hint_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.power_hint_label.set_style_text_font(lv.font_montserrat_14, 0)
+        self.power_hint_label.set_style_text_font(FONT[14], 0)
         self.power_hint_label.set_pos(310, 125)
 
         mini_sep = lv.obj(card)
@@ -2204,13 +2332,13 @@ class InfoHubDisplay:
         self.power_consumption_label = lv.label(card)
         self.power_consumption_label.set_text("-- kWh")
         self.power_consumption_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.power_consumption_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.power_consumption_label.set_style_text_font(FONT[16], 0)
         self.power_consumption_label.set_pos(310, 180)
 
         self.power_consumption_hint = lv.label(card)
         self.power_consumption_hint.set_text(_t("daily_consumption"))
         self.power_consumption_hint.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.power_consumption_hint.set_style_text_font(lv.font_montserrat_14, 0)
+        self.power_consumption_hint.set_style_text_font(FONT[14], 0)
         self.power_consumption_hint.set_pos(310, 210)
 
         sep = lv.obj(card)
@@ -2226,26 +2354,26 @@ class InfoHubDisplay:
         self.power_price_label = lv.label(card)
         self.power_price_label.set_text("-- ct/kWh")
         self.power_price_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.power_price_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.power_price_label.set_style_text_font(FONT[16], 0)
         self.power_price_label.set_pos(50, 375)
 
         self.power_price_hint = lv.label(card)
         self.power_price_hint.set_text(_t("power_price"))
         self.power_price_hint.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.power_price_hint.set_style_text_font(lv.font_montserrat_14, 0)
+        self.power_price_hint.set_style_text_font(FONT[14], 0)
         self.power_price_hint.set_pos(50, 405)
 
         _draw_rect(card, 290, 375, 4, 50, THEME["primary"], 2)
         self.power_cost_label = lv.label(card)
         self.power_cost_label.set_text("-- EUR")
         self.power_cost_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.power_cost_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.power_cost_label.set_style_text_font(FONT[16], 0)
         self.power_cost_label.set_pos(310, 375)
 
         self.power_cost_hint = lv.label(card)
         self.power_cost_hint.set_text(_t("monthly_cost"))
         self.power_cost_hint.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.power_cost_hint.set_style_text_font(lv.font_montserrat_14, 0)
+        self.power_cost_hint.set_style_text_font(FONT[14], 0)
         self.power_cost_hint.set_pos(310, 405)
 
         card.remove_flag(lv.obj.FLAG.SCROLLABLE)
@@ -2268,25 +2396,25 @@ class InfoHubDisplay:
         self.waste_main_type_label = lv.label(card)
         self.waste_main_type_label.set_text("--")
         self.waste_main_type_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.waste_main_type_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.waste_main_type_label.set_style_text_font(FONT[24], 0)
         self.waste_main_type_label.set_pos(190, 75)
 
         self.waste_main_days_label = lv.label(card)
         self.waste_main_days_label.set_text("--")
         self.waste_main_days_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.waste_main_days_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.waste_main_days_label.set_style_text_font(FONT[24], 0)
         self.waste_main_days_label.set_pos(190, 120)
 
         self.waste_main_date_label = lv.label(card)
         self.waste_main_date_label.set_text("")
         self.waste_main_date_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.waste_main_date_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.waste_main_date_label.set_style_text_font(FONT[16], 0)
         self.waste_main_date_label.set_pos(190, 165)
 
         overview_title = lv.label(card)
         overview_title.set_text(_t("all_dates"))
         overview_title.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        overview_title.set_style_text_font(lv.font_montserrat_14, 0)
+        overview_title.set_style_text_font(FONT[14], 0)
         overview_title.set_pos(370, 55)
 
         self.waste_overview_rows = []
@@ -2306,14 +2434,14 @@ class InfoHubDisplay:
             name_lbl = lv.label(card)
             name_lbl.set_text("--")
             name_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            name_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            name_lbl.set_style_text_font(FONT[14], 0)
             name_lbl.set_pos(395, row_y)
             row["name"] = name_lbl
 
             days_lbl = lv.label(card)
             days_lbl.set_text("")
             days_lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-            days_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            days_lbl.set_style_text_font(FONT[14], 0)
             days_lbl.set_pos(395, row_y + 20)
             row["days"] = days_lbl
 
@@ -2349,14 +2477,14 @@ class InfoHubDisplay:
             type_lbl = lv.label(card)
             type_lbl.set_text("--")
             type_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            type_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            type_lbl.set_style_text_font(FONT[14], 0)
             type_lbl.set_pos(col_x + col_width // 2 - 40, 405)
             col["type"] = type_lbl
 
             days_lbl = lv.label(card)
             days_lbl.set_text("--")
             days_lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-            days_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            days_lbl.set_style_text_font(FONT[14], 0)
             days_lbl.set_pos(col_x + col_width // 2 - 40, 430)
             col["days"] = days_lbl
 
@@ -2450,7 +2578,7 @@ class InfoHubDisplay:
         self.clock_weekday_label = lv.label(card)
         self.clock_weekday_label.set_text("--")
         self.clock_weekday_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.clock_weekday_label.set_style_text_font(lv.font_montserrat_24, 0)
+        self.clock_weekday_label.set_style_text_font(FONT[24], 0)
         self.clock_weekday_label.set_pos(content_x0, content_y0 + 165)
         self.clock_weekday_label.set_width(block_w)
         self.clock_weekday_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
@@ -2458,7 +2586,7 @@ class InfoHubDisplay:
         self.clock_date_label = lv.label(card)
         self.clock_date_label.set_text("--")
         self.clock_date_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        self.clock_date_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.clock_date_label.set_style_text_font(FONT[16], 0)
         self.clock_date_label.set_pos(content_x0, content_y0 + 200)
         self.clock_date_label.set_width(block_w)
         self.clock_date_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
@@ -2484,7 +2612,7 @@ class InfoHubDisplay:
         self.cal_month_year_label = lv.label(card)
         self.cal_month_year_label.set_text("-- ----")
         self.cal_month_year_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.cal_month_year_label.set_style_text_font(lv.font_montserrat_16, 0)
+        self.cal_month_year_label.set_style_text_font(FONT[16], 0)
         self.cal_month_year_label.set_pos(grid_x, grid_top)
 
         # Weekday headers
@@ -2493,7 +2621,7 @@ class InfoHubDisplay:
             lbl = lv.label(card)
             lbl.set_text(day)
             lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-            lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            lbl.set_style_text_font(FONT[14], 0)
             lbl.set_pos(grid_x + i * col_w + 15, grid_top + 35)
 
         # Day grid cells (6 rows x 7 cols)
@@ -2521,7 +2649,7 @@ class InfoHubDisplay:
                 num_lbl = lv.label(cell)
                 num_lbl.set_text("")
                 num_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-                num_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+                num_lbl.set_style_text_font(FONT[14], 0)
                 num_lbl.align(lv.ALIGN.CENTER, 0, -4)
 
                 dot = lv.obj(cell)
@@ -2549,7 +2677,7 @@ class InfoHubDisplay:
             self.cal_grid2_month_year_label.set_style_text_color(
                 lv.color_hex(THEME["text"]), 0)
             self.cal_grid2_month_year_label.set_style_text_font(
-                lv.font_montserrat_16, 0)
+                FONT[16], 0)
             self.cal_grid2_month_year_label.set_pos(grid_x, grid2_top)
 
             for i, day in enumerate(DAY_NAMES):
@@ -2557,7 +2685,7 @@ class InfoHubDisplay:
                 lbl.set_text(day)
                 lbl.set_style_text_color(
                     lv.color_hex(THEME["text_secondary"]), 0)
-                lbl.set_style_text_font(lv.font_montserrat_14, 0)
+                lbl.set_style_text_font(FONT[14], 0)
                 lbl.set_pos(grid_x + i * col_w + 15, grid2_top + 35)
 
             for row in range(6):
@@ -2584,7 +2712,7 @@ class InfoHubDisplay:
                     num_lbl.set_text("")
                     num_lbl.set_style_text_color(
                         lv.color_hex(THEME["text_secondary"]), 0)
-                    num_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+                    num_lbl.set_style_text_font(FONT[14], 0)
                     num_lbl.align(lv.ALIGN.CENTER, 0, -4)
 
                     dot = lv.obj(cell)
@@ -2611,7 +2739,7 @@ class InfoHubDisplay:
         self.cal_event_header.set_text(_t("next_appointments"))
         self.cal_event_header.set_style_text_color(
             lv.color_hex(THEME["text_secondary"]), 0)
-        self.cal_event_header.set_style_text_font(lv.font_montserrat_16, 0)
+        self.cal_event_header.set_style_text_font(FONT[16], 0)
         self.cal_event_header.set_pos(evt_x, evt_top)
 
         # Vertical separator between grids and events
@@ -2637,14 +2765,14 @@ class InfoHubDisplay:
             time_lbl.set_text("")
             time_lbl.set_style_text_color(
                 lv.color_hex(THEME["text_secondary"]), 0)
-            time_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            time_lbl.set_style_text_font(FONT[14], 0)
             time_lbl.set_pos(evt_x + 15, item_y + 5)
             item["time"] = time_lbl
 
             title_lbl = lv.label(card)
             title_lbl.set_text("")
             title_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-            title_lbl.set_style_text_font(lv.font_montserrat_16, 0)
+            title_lbl.set_style_text_font(FONT[16], 0)
             title_lbl.set_pos(evt_x + 15, item_y + 28)
             title_lbl.set_width(310)
             item["title"] = title_lbl
@@ -3056,7 +3184,7 @@ class InfoHubDisplay:
         header_lbl = lv.label(self._reminder_card)
         header_lbl.set_text(_t("reminder"))
         header_lbl.set_style_text_color(lv.color_hex(THEME["primary"]), 0)
-        header_lbl.set_style_text_font(lv.font_montserrat_24, 0)
+        header_lbl.set_style_text_font(FONT[24], 0)
         header_lbl.set_pos(25, 20)
 
         # Close button (X) - top right (stored on self to prevent GC)
@@ -3076,7 +3204,7 @@ class InfoHubDisplay:
         x_label = lv.label(self._reminder_close_btn)
         x_label.set_text("X")
         x_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        x_label.set_style_text_font(lv.font_montserrat_24, 0)
+        x_label.set_style_text_font(FONT[24], 0)
         x_label.align(lv.ALIGN.CENTER, 0, 0)
 
         # Separator
@@ -3094,7 +3222,7 @@ class InfoHubDisplay:
         self._reminder_title_label.set_style_text_color(
             lv.color_hex(THEME["text"]), 0)
         self._reminder_title_label.set_style_text_font(
-            lv.font_montserrat_24, 0)
+            FONT[24], 0)
         self._reminder_title_label.set_pos(25, 80)
         self._reminder_title_label.set_width(card_w - 60)
 
@@ -3104,7 +3232,7 @@ class InfoHubDisplay:
         self._reminder_time_label.set_style_text_color(
             lv.color_hex(THEME["text_secondary"]), 0)
         self._reminder_time_label.set_style_text_font(
-            lv.font_montserrat_16, 0)
+            FONT[16], 0)
         self._reminder_time_label.set_pos(25, 130)
 
         # "in X Minuten"
@@ -3113,7 +3241,7 @@ class InfoHubDisplay:
         self._reminder_until_label.set_style_text_color(
             lv.color_hex(THEME["warning"]), 0)
         self._reminder_until_label.set_style_text_font(
-            lv.font_montserrat_24, 0)
+            FONT[24], 0)
         self._reminder_until_label.set_pos(25, 170)
 
     def _show_reminder(self, summary, time_str, minutes_until):
@@ -3701,11 +3829,11 @@ class InfoHubDisplay:
                         label_lbl = lv.label(card)
                         label_lbl.set_style_text_color(
                             lv.color_hex(THEME["text_secondary"]), 0)
-                        label_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+                        label_lbl.set_style_text_font(FONT[14], 0)
                         label_lbl.set_width(max(60, card_w - 110))
                         value_lbl = lv.label(card)
                         value_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-                        value_lbl.set_style_text_font(lv.font_montserrat_16, 0)
+                        value_lbl.set_style_text_font(FONT[16], 0)
                         rows[entity_id] = {"label": label_lbl, "value": value_lbl}
                     row = rows[entity_id]
                     row["label"].set_pos(15, row_y)
@@ -3815,7 +3943,7 @@ class InfoHubDisplay:
             lbl = lv.label(btn)
             lbl.set_text(symbol)
             lbl.set_style_text_color(lv.color_hex(THEME["primary"]), 0)
-            lbl.set_style_text_font(lv.font_montserrat_14, 0)
+            lbl.set_style_text_font(FONT[14], 0)
             lbl.center()
 
             btn.add_event_cb(
@@ -3848,7 +3976,7 @@ class InfoHubDisplay:
 
         value_label = lv.label(card)
         value_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        value_label.set_style_text_font(lv.font_montserrat_16, 0)
+        value_label.set_style_text_font(FONT[16], 0)
         value_label.set_text("--")
 
         def on_pressed(e):
@@ -3875,7 +4003,7 @@ class InfoHubDisplay:
         "slider") - see update_aktoren()."""
         label_lbl = lv.label(card)
         label_lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        label_lbl.set_style_text_font(lv.font_montserrat_14, 0)
+        label_lbl.set_style_text_font(FONT[14], 0)
         label_lbl.set_width(max(60, card_w - (110 if control == "slider" else 130)))
 
         if control == "cover":
@@ -4400,12 +4528,19 @@ async def lvgl_timer():
         await asyncio.sleep(0.02)
 
 
+def _script_dir():
+    import sys
+    path = getattr(sys, "argv", [""])[0] or ""
+    return path.rsplit("/", 1)[0] if "/" in path else "."
+
+
 async def main():
     """Main entry point"""
     print("InfoHub Display Client starting...")
 
     display = InfoHubDisplay()
     display.init_display()
+    init_unicode_fonts(_script_dir())
     display.create_ui()
     display.init_touch()
 
