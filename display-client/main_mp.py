@@ -4040,6 +4040,10 @@ class InfoHubDisplay:
 
             global _LANGUAGE
             _LANGUAGE = layout_msg.get("language", _LANGUAGE)
+            # the status was set on connecting, before the layout said
+            # which language: redraw it in this one
+            if self.status_label:
+                self.set_connected(self.connected)
 
             self._delete_timer(self._scene_timer)
             self._scene_timer = None
