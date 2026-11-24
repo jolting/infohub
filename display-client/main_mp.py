@@ -38,6 +38,21 @@ TOUCH_DEVICE = "/dev/input/event0"
 _INPUT_EVENT_FMT = "<qqHHi"
 _INPUT_EVENT_SIZE = ustruct.calcsize(_INPUT_EVENT_FMT)
 _EV_KEY = 1
+
+# Hardware buttons, sent to Home Assistant (an "infohub_button" event,
+# see the integration's websocket_server.py): the input devices to read,
+# by name (none here; a device's own copy names its own), and the keys
+# they may report. A hold of BUTTON_LONG_MS is a long press, sent as
+# soon as it is reached.
+BUTTON_DEVICES = ()
+BUTTON_KEYS = {
+    114: "volume_down",
+    115: "volume_up",
+    163: "next",
+    164: "play_pause",
+    165: "previous",
+}
+BUTTON_LONG_MS = 700
 _EV_ABS = 3
 _ABS_X = 0
 _ABS_Y = 1
@@ -1187,6 +1202,79 @@ class InfoHubDisplay:
             print("Touch input initialized:", TOUCH_DEVICE)
         except Exception as e:
             print("Touch init error:", e)
+
+    def init_buttons(self):
+        """Opens BUTTON_DEVICES (found by name under /sys/class/input:
+        event numbers move) and polls them from an LVGL timer."""
+        self._buttons = []
+        self._button_down = {}
+        if not BUTTON_DEVICES:
+            return
+        try:
+            import os
+            names = os.listdir("/sys/class/input")
+        except Exception as e:
+            print("Button init error:", e)
+            return
+        poll = select.poll()
+        for name in names:
+            if not name.startswith("event"):
+                continue
+            try:
+                with open("/sys/class/input/%s/device/name" % name) as f:
+                    dev_name = f.read().strip()
+            except OSError:
+                continue
+            if dev_name not in BUTTON_DEVICES:
+                continue
+            try:
+                f = open("/dev/input/" + name, "rb")
+            except OSError as e:
+                print("Button device", name, e)
+                continue
+            poll.register(f, select.POLLIN)
+            self._buttons.append(f)
+            print("Buttons:", dev_name, "/dev/input/" + name)
+        if self._buttons:
+            self._button_poll = poll
+            self._button_timer = lv.timer_create(lambda t: self._read_buttons(), 30, None)
+
+    def _read_buttons(self):
+        """Short presses go on release, long ones once BUTTON_LONG_MS is
+        reached while held (the release then sends nothing)."""
+        try:
+            for f, _ in self._button_poll.poll(0):
+                chunk = f.read(_INPUT_EVENT_SIZE)
+                if not chunk or len(chunk) < _INPUT_EVENT_SIZE:
+                    continue
+                _, _, ev_type, code, value = ustruct.unpack(_INPUT_EVENT_FMT, chunk)
+                if ev_type != _EV_KEY or code not in BUTTON_KEYS:
+                    continue
+                if value == 1:
+                    self._button_down[code] = [time.ticks_ms(), False]
+                elif value == 0:
+                    held = self._button_down.pop(code, None)
+                    if held is not None and not held[1]:
+                        self.send_button(BUTTON_KEYS[code], "short")
+            now = time.ticks_ms()
+            for code, held in self._button_down.items():
+                if not held[1] and time.ticks_diff(now, held[0]) >= BUTTON_LONG_MS:
+                    held[1] = True
+                    self.send_button(BUTTON_KEYS[code], "long")
+        except Exception as e:
+            print("Button read error:", e)
+
+    def send_button(self, button, press):
+        """{"type": "button", ...} to the server; a no-op between
+        connections, like send_action()."""
+        print("Button", button, press)
+        if not self._sock:
+            return
+        try:
+            msg = json.dumps({"type": "button", "button": button, "press": press})
+            self._sock.send(_ws_encode_frame(msg.encode()))
+        except Exception as e:
+            print("Send button error:", e)
 
     def _touch_read_cb(self, indev, data):
         """LVGL polls this every frame (~20x/sec, see the asyncio loop's
@@ -4543,6 +4631,7 @@ async def main():
     init_unicode_fonts(_script_dir())
     display.create_ui()
     display.init_touch()
+    display.init_buttons()
 
     await asyncio.gather(
         websocket_client(display),

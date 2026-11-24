@@ -70,6 +70,11 @@ Home Assistant
   so a light's segment sub-lights stay off; switches are left out, as
   an area's plugs may be anything). It follows Home Assistant's area
   assignments: a light moved into an area shows up there by itself.
+- **Hardware buttons**: a display's buttons (volume up/down, play/pause,
+  next, previous) fire an `infohub_button` event in Home Assistant, with
+  `device_id`, `button` and `press` (`short`, or `long` for a hold), to
+  trigger automations on. The display client reads the input devices
+  named in `BUTTON_DEVICES`.
 - **Push-based data**: entity changes are read straight from
   `hass.states` and pushed live - no REST polling loop.
 - **Google Calendar** via Home Assistant's own Google Calendar

@@ -71,6 +71,7 @@ from .websocket_server import InfoHubWebSocketServer
 logger = logging.getLogger(__name__)
 
 PANEL_URL_PATH = "infohub"
+BUTTON_EVENT = f"{DOMAIN}_button"
 PANEL_JS_URL = "/api/infohub/panel.js"
 PANEL_JS_FILE = Path(__file__).parent / "panel" / "infohub-panel.js"
 
@@ -178,6 +179,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     server = InfoHubWebSocketServer(host="0.0.0.0", port=port)
     server.configure_panels(_build_layouts(panels), default_panel_id, _resolve_panel)
     server.configure_action_handler(_resolve_action)
+
+    async def _on_button(device_id: str | None, button: str, press: str) -> None:
+        # A display's hardware button, for automations: trigger on the
+        # event "infohub_button" (data: device_id, button, press).
+        hass.bus.async_fire(
+            BUTTON_EVENT, {"device_id": device_id, "button": button, "press": press}
+        )
+
+    server.configure_button_handler(_on_button)
     await server.start()
 
     # A lone leftover string from before multi-calendar select existed is

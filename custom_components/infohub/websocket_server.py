@@ -26,6 +26,11 @@ real consequence: anything reachable on this port can send one, bounded
 only by the allowlist - see the actuator-widget plan's "Bekannte offene
 Punkte" for the known gap.
 
+And `{"type": "button", "button": ..., "press": "short"|"long"}`: a
+display's hardware button (BUTTONS), handed to an injected handler
+(configure_button_handler()) with the display's device_id, which the
+integration fires as an `infohub_button` event for automations.
+
 Runs as its own asyncio server on its own port (not embedded in Home
 Assistant's HTTP server), so display clients need no HA auth/session
 handling - they just open a plain websocket connection.
@@ -62,6 +67,13 @@ ResolvePanelFn = Callable[[str | None], "str | None"]
 # before calling any Home Assistant service - this server only parses the
 # wire message and hands it off, it has no opinion on what's allowed.
 ActionHandlerFn = Callable[[str, str, "float | None"], Awaitable[None]]
+# (device_id, button, press) -> None, for `button` messages.
+ButtonHandlerFn = Callable[["str | None", str, str], Awaitable[None]]
+
+# The buttons and presses a display may report: a closed vocabulary, as
+# for actions.
+BUTTONS = ("volume_up", "volume_down", "play_pause", "next", "previous")
+PRESSES = ("short", "long")
 
 
 class InfoHubWebSocketServer:
@@ -81,6 +93,7 @@ class InfoHubWebSocketServer:
         self._connections: dict[WebSocketServerProtocol, str | None] = {}
         self._known_devices: dict[str, str] = {}
         self._on_action: ActionHandlerFn | None = None
+        self._on_button: ButtonHandlerFn | None = None
 
     async def start(self) -> None:
         """Starts the WebSocket server."""
@@ -130,6 +143,10 @@ class InfoHubWebSocketServer:
         for websocket, device_id in list(self._connections.items()):
             await self._send_layout_for(websocket, device_id)
 
+    def configure_button_handler(self, on_button: ButtonHandlerFn) -> None:
+        """Sets the callback invoked for incoming client `button` messages."""
+        self._on_button = on_button
+
     def configure_action_handler(self, on_action: ActionHandlerFn) -> None:
         """Sets the callback invoked for incoming client `action` messages."""
         self._on_action = on_action
@@ -167,7 +184,7 @@ class InfoHubWebSocketServer:
             self._clients.add(websocket)
 
             async for message in websocket:
-                await self._handle_client_message(client_addr, message)
+                await self._handle_client_message(client_addr, message, device_id)
         except websockets.ConnectionClosed:
             logger.info("Client getrennt: %s", client_addr)
         finally:
@@ -190,7 +207,9 @@ class InfoHubWebSocketServer:
             pass
         return None
 
-    async def _handle_client_message(self, client_addr: Any, message: str) -> None:
+    async def _handle_client_message(
+        self, client_addr: Any, message: str, device_id: str | None = None
+    ) -> None:
         """Handles one message from an already-connected client.
 
         Only `{"type": "action", "entity_id": ..., "command": ...,
@@ -203,6 +222,18 @@ class InfoHubWebSocketServer:
             data = json.loads(message)
         except ValueError:
             logger.debug("Ungueltige Nachricht von %s: %s", client_addr, message)
+            return
+
+        if data.get("type") == "button":
+            button = data.get("button")
+            press = data.get("press", "short")
+            if button not in BUTTONS or press not in PRESSES:
+                logger.warning("Unbekannter Button von %s: %s", client_addr, data)
+                return
+            if self._on_button is None:
+                return
+            logger.info("Button von %s (%s): %s %s", client_addr, device_id, button, press)
+            await self._on_button(device_id, button, press)
             return
 
         if data.get("type") != "action":
