@@ -1159,6 +1159,8 @@ class InfoHubDisplay:
         self._swipe_start_x = 0
         self._swipe_start_y = 0
         self._swipe_hooked = False
+        self.on_pull_down = None
+        self.overlay_open = False
 
         # Reminder overlay refs
         self._reminder_dim = None
@@ -1447,7 +1449,18 @@ class InfoHubDisplay:
     def _check_swipe(self, dx, dy):
         """A finger lifted dx/dy from where it went down: a sideways move
         of more than 100 px is a swipe to the next/previous screen. The
-        page changes from a timer, outside LVGL's input read."""
+        page changes from a timer, outside LVGL's input read.
+
+        A move down of more than 150 px that started in the header calls
+        self.on_pull_down, if set (a device's own settings, say). While
+        self.overlay_open, swipes do nothing: the overlay has the touch."""
+        if self.overlay_open:
+            return
+        if (self.on_pull_down is not None and self._swipe_start_y < HEADER_HEIGHT
+                and dy > 150 and dy > abs(dx)):
+            timer = lv.timer_create(lambda t: self.on_pull_down(), 0, None)
+            timer.set_repeat_count(1)
+            return
         if len(self._layout_screen_ids) < 2:
             return
         if abs(dx) <= 100 or abs(dx) <= abs(dy):
