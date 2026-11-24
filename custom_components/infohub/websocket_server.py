@@ -94,6 +94,10 @@ class InfoHubWebSocketServer:
         self._known_devices: dict[str, str] = {}
         self._on_action: ActionHandlerFn | None = None
         self._on_button: ButtonHandlerFn | None = None
+        # device_id -> {"connected", "last_seen", "address"}, and who is
+        # told when one changes (binary_sensor.py)
+        self._device_state: dict[str, dict[str, Any]] = {}
+        self._device_listeners: list[Callable[[str], None]] = []
 
     async def start(self) -> None:
         """Starts the WebSocket server."""
@@ -151,6 +155,38 @@ class InfoHubWebSocketServer:
         """Sets the callback invoked for incoming client `action` messages."""
         self._on_action = on_action
 
+    def add_device_listener(self, listener: Callable[[str], None]) -> Callable[[], None]:
+        """listener(device_id) is called when a display connects or
+        disconnects; returns the function that removes it."""
+        self._device_listeners.append(listener)
+        return lambda: self._device_listeners.remove(listener)
+
+    def clear_device_listeners(self) -> None:
+        """Before stop(): its closing connections then tell no one."""
+        self._device_listeners.clear()
+
+    def device_state(self, device_id: str) -> dict[str, Any] | None:
+        """{"connected", "last_seen", "address"} of a display seen since
+        this server started, or None."""
+        return self._device_state.get(device_id)
+
+    def _set_device_state(self, device_id: str, websocket: WebSocketServerProtocol) -> None:
+        """Re-derives a display's state from its open connections (a
+        display reconnecting may briefly have two) and tells listeners."""
+        connected = any(d == device_id for d in self._connections.values())
+        address = websocket.remote_address[0] if websocket.remote_address else None
+        prev = self._device_state.get(device_id, {})
+        self._device_state[device_id] = {
+            "connected": connected,
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+            "address": address or prev.get("address"),
+        }
+        for listener in list(self._device_listeners):
+            try:
+                listener(device_id)
+            except Exception:  # a listener's bug must not drop the display
+                logger.exception("Device listener failed for %s", device_id)
+
     def get_known_devices(self) -> list[dict[str, Any]]:
         """Devices that have identified themselves at least once (for the panel dropdown)."""
         return [
@@ -176,6 +212,8 @@ class InfoHubWebSocketServer:
             self._known_devices[device_id] = datetime.now(timezone.utc).isoformat()
             logger.info("Client identifiziert: %s -> device_id=%s", client_addr, device_id)
         self._connections[websocket] = device_id
+        if device_id:
+            self._set_device_state(device_id, websocket)
 
         try:
             await self._send_layout_for(websocket, device_id)
@@ -190,6 +228,8 @@ class InfoHubWebSocketServer:
         finally:
             self._clients.discard(websocket)
             self._connections.pop(websocket, None)
+            if device_id:
+                self._set_device_state(device_id, websocket)
 
     async def _await_hello(self, websocket: WebSocketServerProtocol) -> str | None:
         """Waits briefly for a {"type": "hello", "device_id": ...} message.

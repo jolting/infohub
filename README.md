@@ -75,6 +75,9 @@ Home Assistant
   `device_id`, `button` and `press` (`short`, or `long` for a hold), to
   trigger automations on. The display client reads the input devices
   named in `BUTTON_DEVICES`.
+- **Display status**: each display that identifies itself gets a
+  connectivity sensor (on while connected; `last_seen` and `address`
+  attributes) and a device in Home Assistant, kept across restarts.
 - **Push-based data**: entity changes are read straight from
   `hass.states` and pushed live - no REST polling loop.
 - **Google Calendar** via Home Assistant's own Google Calendar

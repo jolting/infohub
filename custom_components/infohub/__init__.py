@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 PANEL_URL_PATH = "infohub"
 BUTTON_EVENT = f"{DOMAIN}_button"
+PLATFORMS = ["binary_sensor"]
 PANEL_JS_URL = "/api/infohub/panel.js"
 PANEL_JS_FILE = Path(__file__).parent / "panel" / "infohub-panel.js"
 
@@ -332,14 +333,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
+    # each display's connectivity (binary_sensor.py)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an InfoHub config entry."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     entry_data = hass.data[DOMAIN].pop(entry.entry_id)
     entry_data["unsub_panels"]()
     entry_data["coordinator"].async_stop()
+    entry_data["server"].clear_device_listeners()
     await entry_data["server"].stop()
     async_remove_panel(hass, PANEL_URL_PATH)
     return True
