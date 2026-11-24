@@ -357,9 +357,11 @@ class InfoHubWebSocketServer:
     async def broadcast_entity_update(
         self, group: str, entity_id: str, data: dict[str, Any]
     ) -> None:
-        """Sends a single entity update to all clients."""
-        if group in self._current_data:
-            self._current_data[group][entity_id] = data
+        """Sends a single entity update to all clients, and keeps it for
+        the next one to connect (its group created if it has none yet:
+        InfoHub starts before most integrations, so its first snapshot
+        lacks their entities, and their first states arrive this way)."""
+        self._current_data.setdefault(group, {})[entity_id] = data
 
         if not self._clients:
             return
