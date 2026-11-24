@@ -981,8 +981,13 @@ class InfohubPanel extends HTMLElement {
       el.className = "widget-box" + (widget.id === this._selectedWidgetId ? " selected" : "");
       el.style.left = widget.pos.col * CELL_PX + "px";
       el.style.top = widget.pos.row * CELL_PX + "px";
-      el.style.width = widget.pos.colspan * CELL_PX + "px";
-      el.style.height = widget.pos.rowspan * CELL_PX + "px";
+      // drawn inside the canvas even if stored bigger (an older editor
+      // let a resize run past the edge): the canvas clips, and a box
+      // cut off there would lose its remove button and resize handle
+      el.style.width =
+        Math.max(1, Math.min(widget.pos.colspan, GRID_COLS - widget.pos.col)) * CELL_PX + "px";
+      el.style.height =
+        Math.max(1, Math.min(widget.pos.rowspan, GRID_ROWS - widget.pos.row)) * CELL_PX + "px";
       el.textContent = widget.alias || catalog.label[lang];
       el.dataset.id = widget.id;
 
@@ -1026,8 +1031,9 @@ class InfohubPanel extends HTMLElement {
   }
 
   _attachDragHandlers(el, handle, widget, panel, canvas) {
-    const maxLeft = (GRID_COLS - 2) * CELL_PX;
-    const maxTop = (GRID_ROWS - 2) * CELL_PX;
+    // a box is dragged and resized within the grid, never past its edge
+    const maxLeft = () => GRID_COLS * CELL_PX - parseFloat(el.style.width);
+    const maxTop = () => GRID_ROWS * CELL_PX - parseFloat(el.style.height);
 
     let dragging = false;
     let startX = 0;
@@ -1050,8 +1056,8 @@ class InfohubPanel extends HTMLElement {
     });
     el.addEventListener("pointermove", (ev) => {
       if (!dragging) return;
-      const left = Math.min(Math.max(0, origLeft + ev.clientX - startX), maxLeft);
-      const top = Math.min(Math.max(0, origTop + ev.clientY - startY), maxTop);
+      const left = Math.min(Math.max(0, origLeft + ev.clientX - startX), maxLeft());
+      const top = Math.min(Math.max(0, origTop + ev.clientY - startY), maxTop());
       el.style.left = left + "px";
       el.style.top = top + "px";
     });
@@ -1064,7 +1070,9 @@ class InfohubPanel extends HTMLElement {
       el.style.left = col * CELL_PX + "px";
       el.style.top = row * CELL_PX + "px";
       this._updateWidgetPos(panel.id, widget.id, {
-        col, row, colspan: widget.pos.colspan, rowspan: widget.pos.rowspan,
+        col, row,
+        colspan: Math.round(parseFloat(el.style.width) / CELL_PX),
+        rowspan: Math.round(parseFloat(el.style.height) / CELL_PX),
       });
     });
 
@@ -1083,8 +1091,10 @@ class InfohubPanel extends HTMLElement {
     });
     handle.addEventListener("pointermove", (ev) => {
       if (!resizing) return;
-      const w = Math.max(2 * CELL_PX, startW + ev.clientX - startX);
-      const h = Math.max(2 * CELL_PX, startH + ev.clientY - startY);
+      const maxW = GRID_COLS * CELL_PX - parseFloat(el.style.left);
+      const maxH = GRID_ROWS * CELL_PX - parseFloat(el.style.top);
+      const w = Math.min(maxW, Math.max(2 * CELL_PX, startW + ev.clientX - startX));
+      const h = Math.min(maxH, Math.max(2 * CELL_PX, startH + ev.clientY - startY));
       el.style.width = w + "px";
       el.style.height = h + "px";
     });
