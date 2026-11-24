@@ -66,6 +66,15 @@ _BTN_TOUCH = 0x14A
 # start around y=50), this is the equivalent for the generic ones.
 CARD_CONTENT_TOP = 50
 
+# A switch tile's rows: height, the rocker switch's size, the label's
+# font size. The whole row toggles, not just the switch; a touch that
+# moved more than TAP_SLOP px (a swipe across the row) is no tap.
+SWITCH_ROW_H = 70
+SWITCH_TOGGLE_W = 44
+SWITCH_TOGGLE_H = 60
+SWITCH_LABEL_SIZE = 14
+TAP_SLOP = 30
+
 # Stabile Geraete-ID, mit der sich dieser Client beim Server meldet (siehe
 # _ws_encode_frame()/"hello"-Nachricht) - der InfoHub-Sidebar-Panel kann
 # darueber ein bestimmtes Panel-Layout genau diesem Geraet zuordnen.
@@ -1159,6 +1168,7 @@ class InfoHubDisplay:
         self._swipe_start_x = 0
         self._swipe_start_y = 0
         self._swipe_hooked = False
+        self._touch_moved = 0
         self.on_pull_down = None
         self.overlay_open = False
 
@@ -1307,6 +1317,8 @@ class InfoHubDisplay:
                         self._swipe_start_x = self._touch_x
                         self._swipe_start_y = self._touch_y
                     elif not pressed and self._touch_pressed:
+                        self._touch_moved = max(abs(self._touch_x - self._swipe_start_x),
+                                                abs(self._touch_y - self._swipe_start_y))
                         self._check_swipe(self._touch_x - self._swipe_start_x,
                                           self._touch_y - self._swipe_start_y)
                     self._touch_pressed = pressed
@@ -3969,7 +3981,7 @@ class InfoHubDisplay:
         # Styled after a classic illuminated power-strip rocker switch
         # (red=off/green=on, the rocker face filling most of a slim dark
         # bezel) rather than a soft pill-in-a-track look.
-        track_w, track_h = 44, 60
+        track_w, track_h = SWITCH_TOGGLE_W, SWITCH_TOGGLE_H
         track = lv.obj(card)
         track.set_size(track_w, track_h)
         track.set_style_radius(4, 0)
@@ -3999,6 +4011,20 @@ class InfoHubDisplay:
             lv.EVENT.CLICKED, None)
         return toggle
 
+    def _create_row_hit(self, card, entity_id, toggle):
+        """A transparent target over a toggle row, under its switch: a tap
+        on the label or anywhere along the row toggles too."""
+        hit = lv.obj(card)
+        hit.set_style_bg_opa(0, 0)
+        hit.set_style_border_width(0, 0)
+        hit.set_style_pad_all(0, 0)
+        hit.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        hit.add_event_cb(
+            lambda e, eid=entity_id, t=toggle: self._on_toggle_switch_tapped(eid, t),
+            lv.EVENT.CLICKED, None)
+        hit.move_background()
+        return hit
+
     def _position_toggle_paddle(self, toggle):
         """Moves/colors a toggle's paddle to match toggle["state"] -
         used both for real updates (update_aktoren()) and the optimistic
@@ -4022,6 +4048,8 @@ class InfoHubDisplay:
         immediate feedback (the real state arrives moments later via the
         normal entity_update flow and reconciles this if needed - see
         update_aktoren()) and tell the server."""
+        if self._touch_moved > TAP_SLOP:
+            return  # a swipe that ended on the row, not a tap
         toggle["state"] = not toggle["state"]
         self._position_toggle_paddle(toggle)
         self.send_action(entity_id, "toggle")
@@ -4107,8 +4135,8 @@ class InfoHubDisplay:
         "slider") - see update_aktoren()."""
         label_lbl = lv.label(card)
         label_lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
-        label_lbl.set_style_text_font(FONT[14], 0)
-        label_lbl.set_width(max(60, card_w - (110 if control == "slider" else 130)))
+        label_lbl.set_style_text_font(FONT[SWITCH_LABEL_SIZE], 0)
+        label_lbl.set_width(max(60, card_w - (110 if control == "slider" else 50 + SWITCH_TOGGLE_W * 2)))
 
         if control == "cover":
             buttons = self._create_cover_buttons(card, entity_id)
@@ -4120,7 +4148,8 @@ class InfoHubDisplay:
                 "value_label": value_label, "dragging": False, "_unit": "",
             }
         toggle = self._create_toggle_switch(card, entity_id)
-        return {"control": "toggle", "label": label_lbl, "switch": toggle}
+        hit = self._create_row_hit(card, entity_id, toggle)
+        return {"control": "toggle", "label": label_lbl, "switch": toggle, "hit": hit}
 
     def _delete_aktor_row(self, row):
         """Deletes every LVGL object a switch_tile row owns (see
@@ -4139,6 +4168,8 @@ class InfoHubDisplay:
             # Deletes the paddle too (LVGL deletes children along with
             # their parent).
             row["switch"]["track"].delete()
+            if row.get("hit") is not None:
+                row["hit"].delete()
 
     def _position_aktor_row(self, row, row_y, card_w):
         """Positions one switch_tile row's widgets for this update pass -
@@ -4156,8 +4187,15 @@ class InfoHubDisplay:
             row["slider"].set_width(max(60, card_w - 110))
             row["value_label"].align(lv.ALIGN.TOP_RIGHT, -15, row_y)
         else:
-            row["label"].set_pos(15, row_y + 20)
+            try:
+                line_h = FONT[SWITCH_LABEL_SIZE].line_height
+            except Exception:
+                line_h = 20
+            row["label"].set_pos(15, row_y + (SWITCH_TOGGLE_H - line_h) // 2)
             row["switch"]["track"].align(lv.ALIGN.TOP_RIGHT, -20, row_y)
+            if row.get("hit") is not None:
+                row["hit"].set_size(card_w - 20, SWITCH_ROW_H - 6)
+                row["hit"].set_pos(0, row_y + (SWITCH_TOGGLE_H - SWITCH_ROW_H) // 2 + 3)
 
     def _update_aktor_slider(self, row, entity_data):
         """Applies a slider row's current range/value from entity_data -
@@ -4200,7 +4238,7 @@ class InfoHubDisplay:
             # Taller than value_tile's rows (34px) and than the old
             # lv.switch()-based rows - this row's touch target (and the
             # rocker-switch visual) needs more vertical room.
-            row_h = 70
+            row_h = SWITCH_ROW_H
             all_items = sorted(data.items(), key=lambda kv: kv[1].get("label", kv[0]))
             for tile in self._switch_tiles:
                 card = tile["card"]
