@@ -1025,6 +1025,7 @@ class InfoHubDisplay:
         # lets send_action() reach the live socket from a switch-tap
         # callback without threading it through every function call.
         self._sock = None
+        self._sock_broken = False
 
         # Weather current card refs
         self.weather_card = None
@@ -1275,6 +1276,7 @@ class InfoHubDisplay:
             self._sock.send(_ws_encode_frame(msg.encode()))
         except Exception as e:
             print("Send button error:", e)
+            self._sock_broken = True
 
     def _touch_read_cb(self, indev, data):
         """LVGL polls this every frame (~20x/sec, see the asyncio loop's
@@ -3822,6 +3824,7 @@ class InfoHubDisplay:
             self._sock.send(_ws_encode_frame(msg))
         except Exception as e:
             print("Send action error:", e)
+            self._sock_broken = True
 
     def update_indoor(self, data):
         """Update indoor climate labels and comfort gauge."""
@@ -4511,6 +4514,7 @@ async def websocket_client(display):
                 print("WebSocket connected")
                 display.set_connected(True)
                 display._sock = sock
+                display._sock_broken = False
 
                 hello = json.dumps({"type": "hello", "device_id": DEVICE_ID}).encode()
                 sock.send(_ws_encode_frame(hello))
@@ -4525,12 +4529,23 @@ async def websocket_client(display):
                         if time.time() - last_data_time > 60:
                             print("No data for 60s, reconnecting")
                             break
+                        # a send found the connection broken (send_action/
+                        # send_button)
+                        if display._sock_broken:
+                            print("Send failed, reconnecting")
+                            break
 
                         try:
                             data = sock.recv(1024)
                             if data:
                                 buffer += data
                                 last_data_time = time.time()
+                            elif data is not None:
+                                # b"": the server closed the connection
+                                # (Home Assistant restarting, say) - not
+                                # the 60 s above to notice
+                                print("Connection closed, reconnecting")
+                                break
                         except OSError as e:
                             if e.args[0] != 11:
                                 raise
