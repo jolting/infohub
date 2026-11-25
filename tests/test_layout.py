@@ -41,3 +41,14 @@ def test_empty_panel_still_has_a_screen():
 def test_alias_overrides_the_label():
     layout = layout_from_panel(panel(widgets=[{**WIDGET, "alias": "Time"}])).as_dict()
     assert layout["screens"][0]["widgets"][0]["label"] == "Time"
+
+
+def test_compact_order_keeps_only_widgets_that_exist():
+    widgets = [WIDGET, {**WIDGET, "id": "w2", "type": "weather_current"}]
+    layout = layout_from_panel(panel(widgets=widgets, compact_order=["w2", "gone", "w1"])).as_dict()
+    assert layout["screens"][0]["compact_order"] == ["w2", "w1"]
+
+
+def test_no_compact_order_by_default():
+    layout = layout_from_panel(panel(widgets=[WIDGET])).as_dict()
+    assert layout["screens"][0]["compact_order"] == []

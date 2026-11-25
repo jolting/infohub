@@ -59,3 +59,9 @@ GROUP_AKTOREN = "aktoren"
 # current real-world behavior.
 LANGUAGE_CHOICES = ("de", "en")
 DEFAULT_LANGUAGE = "en"
+
+# What a panel is laid out for: "large" (the grid, 1920x1200 landscape)
+# or "r1" (a narrow portrait display such as the HiBy R1, 480x800: the
+# widgets stacked in compact_order).
+SCREEN_CHOICES = ("large", "r1")
+DEFAULT_SCREEN = "large"

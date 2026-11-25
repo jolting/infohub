@@ -52,6 +52,13 @@ const STRINGS = {
     defaultPanelLabel: "Standard-Panel (Fallback für nicht zugeordnete Displays)",
     assignedDevice: "Zugeordnetes Display",
     displayLanguage: "Display-Sprache",
+    screenLabel: "Bildschirm",
+    screenLarge: "Groß (Querformat)",
+    screenR1: "HiBy R1 (480×800 hochkant)",
+    compactHint: "Der R1 stapelt die Widgets in dieser Reihenfolge untereinander, Seite für Seite; rechts die Seiten, wie er sie zeigt.",
+    moveUp: "Nach oben",
+    moveDown: "Nach unten",
+    pageLabel: (n) => `Seite ${n}`,
     areasHeading: "Räume",
     areasHint: "Jeder gewählte Bereich wird ein eigener Bildschirm mit seinen Lichtern, Ventilatoren und Rollläden, in der Reihenfolge der Auswahl; auf dem Display wischen.",
     noAreas: "Keine Bereiche in Home Assistant.",
@@ -112,6 +119,13 @@ const STRINGS = {
     defaultPanelLabel: "Default panel (fallback for unassigned displays)",
     assignedDevice: "Assigned display",
     displayLanguage: "Display language",
+    screenLabel: "Screen",
+    screenLarge: "Large (landscape)",
+    screenR1: "HiBy R1 (480×800 portrait)",
+    compactHint: "The R1 stacks the widgets top to bottom in this order, page by page; the pages it shows are on the right.",
+    moveUp: "Move up",
+    moveDown: "Move down",
+    pageLabel: (n) => `Page ${n}`,
     areasHeading: "Rooms",
     areasHint: "Each area picked becomes a screen of its own with its lights, fans and covers, in the order picked; swipe between them on the display.",
     noAreas: "No areas in Home Assistant.",
@@ -247,6 +261,74 @@ const OPTION_LABELS = {
 const GRID_COLS = 24;
 const GRID_ROWS = 14;
 const CELL_PX = 40; // Editor-Canvas-Zellengroesse (Realitaet auf dem Display: 80px)
+
+// How a narrow display (a panel's screen "r1") stacks the widgets: the
+// same numbers as the display client's COMPACT_HEIGHT and
+// COMPACT_MIN_HEIGHT (display-client/main_mp.py), so the preview shows
+// the pages it will. null: the rest of the page, if at least the
+// minimum is left.
+const COMPACT = {
+  width: 480,
+  height: 800,
+  header: 80,
+  margin: 8,
+  bottomClear: 40,
+  heights: {
+    clock: 280,
+    weather_current: null,
+    indoor_climate: 350,
+    power_gauge: 470,
+    waste_next: 520,
+    calendar_month: null,
+    value_tile: null,
+    switch_tile: null,
+  },
+  minHeights: { weather_current: 380, calendar_month: 420, value_tile: 160, switch_tile: 220 },
+};
+const PREVIEW_SCALE = 0.5;
+
+// The widgets in the order a narrow display stacks them: the panel's
+// compact_order, then the rest in grid order (as the client does).
+function _compactOrder(panel) {
+  const widgets = panel.widgets || [];
+  const order = (panel.compact_order || []).filter((id) => widgets.some((w) => w.id === id));
+  const rest = widgets
+    .filter((w) => !order.includes(w.id))
+    .sort((a, b) => a.pos.col - b.pos.col || a.pos.row - b.pos.row)
+    .map((w) => w.id);
+  return [...order, ...rest];
+}
+
+// [[{widget, y, h}, ...], ...]: the pages, as the client's _plan_pages().
+function _planCompactPages(widgets) {
+  const top = COMPACT.header + COMPACT.margin;
+  const bottom = COMPACT.height - COMPACT.bottomClear;
+  const pages = [];
+  let page = [];
+  let y = top;
+  for (const widget of widgets) {
+    let h = COMPACT.heights[widget.type];
+    if (h === null || h === undefined) {
+      const min = COMPACT.minHeights[widget.type] ?? bottom - top;
+      if (page.length && bottom - y < min) {
+        pages.push(page);
+        page = [];
+        y = top;
+      }
+      h = bottom - y;
+    }
+    h = Math.min(h, bottom - top);
+    if (page.length && y + h > bottom) {
+      pages.push(page);
+      page = [];
+      y = top;
+    }
+    page.push({ widget, y, h });
+    y += h + COMPACT.margin;
+  }
+  if (page.length || !pages.length) pages.push(page);
+  return pages;
+}
 
 class InfohubPanel extends HTMLElement {
   constructor() {
@@ -440,6 +522,21 @@ class InfohubPanel extends HTMLElement {
     this._panels[updated.id] = updated;
   }
 
+  async _setScreen(panelId, screen) {
+    const updated = await this._call("infohub/panel/update", { panel_id: panelId, screen });
+    this._panels[updated.id] = updated;
+    this._renderWidgetEditor(updated);
+  }
+
+  async _setCompactOrder(panelId, order) {
+    const updated = await this._call("infohub/panel/update", {
+      panel_id: panelId,
+      compact_order: order,
+    });
+    this._panels[updated.id] = updated;
+    this._renderWidgetEditor(updated);
+  }
+
   async _setAreas(panelId, areas) {
     const updated = await this._call("infohub/panel/update", {
       panel_id: panelId,
@@ -577,9 +674,9 @@ class InfohubPanel extends HTMLElement {
 
   // -- Widgets (layout editor) ---------------------------------------------
 
-  async _saveWidgets(panelId, widgets) {
+  async _saveWidgets(panelId, widgets, extra = {}) {
     try {
-      const updated = await this._call("infohub/panel/update", { panel_id: panelId, widgets });
+      const updated = await this._call("infohub/panel/update", { panel_id: panelId, widgets, ...extra });
       this._panels[updated.id] = updated;
       return updated;
     } catch (err) {
@@ -608,7 +705,10 @@ class InfohubPanel extends HTMLElement {
         options,
       },
     ];
-    await this._saveWidgets(panelId, widgets);
+    // on a narrow screen a new widget goes to the end of the stack
+    const extra =
+      panel.screen === "r1" ? { compact_order: [..._compactOrder(panel), widgets[widgets.length - 1].id] } : {};
+    await this._saveWidgets(panelId, widgets, extra);
     this._render();
   }
 
@@ -876,6 +976,30 @@ class InfohubPanel extends HTMLElement {
           cursor: move;
           user-select: none;
         }
+        .compact-editor { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+        .compact-list { min-width: 240px; display: grid; gap: 4px; }
+        .compact-row {
+          display: flex; align-items: center; gap: 4px;
+          padding: 6px 8px; border: 1px solid var(--divider-color); border-radius: 6px; cursor: pointer;
+        }
+        .compact-row.selected { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.15); }
+        .compact-name { flex: 1; }
+        .compact-pages { display: flex; gap: 16px; flex-wrap: wrap; }
+        .compact-page-wrap { display: grid; gap: 4px; justify-items: center; }
+        .compact-page {
+          position: relative; box-sizing: border-box; overflow: hidden;
+          background: #0a0a1e; border: 6px solid #222; border-radius: 14px;
+        }
+        .compact-header {
+          display: flex; align-items: center; padding-left: 15px;
+          color: #fff; font-size: 12px; background: rgba(0, 0, 0, 0.45);
+        }
+        .compact-box {
+          position: absolute; box-sizing: border-box; padding: 4px 6px;
+          border: 1px solid #4a4a6a; border-radius: 8px;
+          background: rgba(26, 26, 58, 0.9); color: #c8cce0; font-size: 11px; cursor: pointer;
+        }
+        .compact-box.selected { border: 2px solid var(--primary-color); }
         .widget-box.selected { border-width: 2px; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.3); }
         .widget-box .remove-widget {
           position: absolute; top: 2px; right: 2px;
@@ -967,6 +1091,13 @@ class InfohubPanel extends HTMLElement {
           <select id="edit-device"><option value="">${t.loading}</option></select>
         </label>
         <label class="hint">
+          ${t.screenLabel}
+          <select id="edit-screen">
+            <option value="large" ${panel.screen !== "r1" ? "selected" : ""}>${t.screenLarge}</option>
+            <option value="r1" ${panel.screen === "r1" ? "selected" : ""}>${t.screenR1}</option>
+          </select>
+        </label>
+        <label class="hint">
           ${t.displayLanguage}
           <select id="edit-language">
             <option value="de" ${language === "de" ? "selected" : ""}>Deutsch</option>
@@ -993,6 +1124,9 @@ class InfohubPanel extends HTMLElement {
     });
     editor.querySelector("#edit-language").addEventListener("change", (ev) => {
       this._setLanguage(panel.id, ev.target.value);
+    });
+    editor.querySelector("#edit-screen").addEventListener("change", (ev) => {
+      this._setScreen(panel.id, ev.target.value);
     });
     this._populateDeviceSelect(panel);
     this._renderAreas(panel);
@@ -1062,6 +1196,10 @@ class InfohubPanel extends HTMLElement {
   _renderWidgetEditor(panel) {
     const wrap = this.querySelector("#grid-wrap");
     if (!wrap) return;
+    if (panel.screen === "r1") {
+      this._renderCompactEditor(panel, wrap);
+      return;
+    }
 
     const lang = this._lang();
     const widgets = panel.widgets || [];
@@ -1121,6 +1259,88 @@ class InfohubPanel extends HTMLElement {
 
     const selectedWidget = widgets.find((w) => w.id === this._selectedWidgetId);
     this._renderWidgetOptions(panel, selectedWidget);
+  }
+
+  // A narrow display's layout: the stacking order (reordered with the
+  // arrows) and a preview of its pages. The grid positions stay as they
+  // are, for when the panel is switched back to a large screen.
+  _renderCompactEditor(panel, wrap) {
+    const t = STRINGS[this._lang()];
+    const lang = this._lang();
+    const byId = Object.fromEntries((panel.widgets || []).map((w) => [w.id, w]));
+    const order = _compactOrder(panel);
+    const label = (w) => w.alias || (WIDGET_CATALOG[w.type] || { label: { de: w.type, en: w.type } }).label[lang];
+
+    const rows = order
+      .map((id, i) => {
+        const w = byId[id];
+        return `
+        <div class="compact-row ${id === this._selectedWidgetId ? "selected" : ""}" data-id="${_escapeAttr(id)}">
+          <span class="compact-name">${_escape(label(w))}</span>
+          <button class="icon-button" data-move="-1" data-index="${i}" title="${t.moveUp}" ${i === 0 ? "disabled" : ""}>▲</button>
+          <button class="icon-button" data-move="1" data-index="${i}" title="${t.moveDown}" ${i === order.length - 1 ? "disabled" : ""}>▼</button>
+          <button class="icon-button" data-remove="${_escapeAttr(id)}" title="${t.delete}">✕</button>
+        </div>`;
+      })
+      .join("");
+
+    const s = PREVIEW_SCALE;
+    const pages = _planCompactPages(order.map((id) => byId[id]));
+    const previews = pages
+      .map(
+        (page, n) => `
+        <div class="compact-page-wrap">
+          <div class="compact-page" style="width:${COMPACT.width * s}px; height:${COMPACT.height * s}px;">
+            <div class="compact-header" style="height:${COMPACT.header * s}px;">${_escape(panel.name)}</div>
+            ${page
+              .map(
+                ({ widget, y, h }) => `
+              <div class="compact-box ${widget.id === this._selectedWidgetId ? "selected" : ""}" data-id="${_escapeAttr(widget.id)}"
+                style="left:${COMPACT.margin * s}px; top:${y * s}px; width:${(COMPACT.width - 2 * COMPACT.margin) * s}px; height:${h * s}px;">
+                ${_escape(label(widget))}
+              </div>`
+              )
+              .join("")}
+          </div>
+          <div class="hint">${t.pageLabel(n + 1)}</div>
+        </div>`
+      )
+      .join("");
+
+    wrap.innerHTML = `
+      <div class="hint" style="margin-bottom:8px;">${t.compactHint}</div>
+      <div class="compact-editor">
+        <div class="compact-list">${rows}</div>
+        <div class="compact-pages">${previews}</div>
+      </div>`;
+
+    const select = (id) => {
+      this._selectedWidgetId = id;
+      this._entityEditIndex = null;
+      this._addingEntity = false;
+      wrap.querySelectorAll("[data-id]").forEach((el) => el.classList.toggle("selected", el.dataset.id === id));
+      this._renderWidgetOptions(this._panels[panel.id] || panel, byId[id]);
+    };
+    wrap.querySelectorAll(".compact-row, .compact-box").forEach((el) =>
+      el.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        select(el.dataset.id);
+      })
+    );
+    wrap.querySelectorAll("[data-move]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const i = Number(btn.dataset.index);
+        const j = i + Number(btn.dataset.move);
+        const next = order.slice();
+        [next[i], next[j]] = [next[j], next[i]];
+        this._setCompactOrder(panel.id, next);
+      })
+    );
+    wrap.querySelectorAll("[data-remove]").forEach((btn) =>
+      btn.addEventListener("click", () => this._removeWidget(panel.id, btn.dataset.remove))
+    );
+
+    this._renderWidgetOptions(panel, byId[this._selectedWidgetId]);
   }
 
   _attachDragHandlers(el, handle, widget, panel, canvas) {

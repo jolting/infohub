@@ -4767,9 +4767,10 @@ class InfoHubDisplay:
 
         The grid describes the content area *below* the always-visible
         header (HEADER_HEIGHT), not the full screen. On a compact
-        display the widgets are stacked instead: full width, column by
-        column (the grid's columns are how its author grouped them),
-        each COMPACT_HEIGHT tall, onto as many pages as they fill.
+        display the widgets are stacked instead: full width, in the
+        screen's compact_order (else column by column: the grid's
+        columns are how its author grouped them), each COMPACT_HEIGHT
+        tall or the rest of the page, onto as many pages as they fill.
         """
         widgets = screen.get("widgets", [])
         if not _is_compact():
@@ -4787,9 +4788,14 @@ class InfoHubDisplay:
                     round(pos.get("rowspan", 1) * cell_h)))
             return [placed]
 
+        # the panel's own order for narrow displays (compact_order),
+        # then any widget it doesn't list, in grid order
+        order = {wid: i for i, wid in enumerate(screen.get("compact_order") or [])}
+
         def grid_order(widget):
             pos = widget.get("pos", {})
-            return (pos.get("col", 0), pos.get("row", 0))
+            return (order.get(widget.get("id"), len(order)),
+                    pos.get("col", 0), pos.get("row", 0))
 
         m = COMPACT_MARGIN
         top = HEADER_HEIGHT + m

@@ -26,7 +26,14 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import collection
 from homeassistant.helpers.storage import Store
 
-from .const import CONF_ENTITIES, DEFAULT_LANGUAGE, DOMAIN, LANGUAGE_CHOICES
+from .const import (
+    CONF_ENTITIES,
+    DEFAULT_LANGUAGE,
+    DEFAULT_SCREEN,
+    DOMAIN,
+    LANGUAGE_CHOICES,
+    SCREEN_CHOICES,
+)
 from .entities import DEFAULT_ENTITY_GROUPS, entity_groups_as_list
 from .widgets import DEFAULT_WIDGETS
 
@@ -54,6 +61,10 @@ CREATE_FIELDS: dict = {
     # Home Assistant area ids, one screen each after the widgets' (see
     # areas.py)
     vol.Optional("areas", default=list): [str],
+    # the display it is laid out for (const.SCREEN_CHOICES), and on a
+    # narrow one the order its widgets are stacked in (widget ids)
+    vol.Optional("screen", default=DEFAULT_SCREEN): vol.In(SCREEN_CHOICES),
+    vol.Optional("compact_order", default=list): [str],
 }
 
 # UPDATE_FIELDS: no defaults, so a field the frontend didn't send stays
@@ -68,6 +79,8 @@ UPDATE_FIELDS: dict = {
     vol.Optional("assigned_device_id"): vol.Any(None, str),
     vol.Optional("language"): vol.In(LANGUAGE_CHOICES),
     vol.Optional("areas"): [str],
+    vol.Optional("screen"): vol.In(SCREEN_CHOICES),
+    vol.Optional("compact_order"): [str],
 }
 
 

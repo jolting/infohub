@@ -103,6 +103,9 @@ class Screen:
     grid_cols: int
     grid_rows: int
     widgets: tuple[Widget, ...]
+    # widget ids in the order a narrow display stacks them; widgets not
+    # listed follow in grid order
+    compact_order: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +114,7 @@ class Screen:
             "icon": self.icon,
             "grid": {"cols": self.grid_cols, "rows": self.grid_rows},
             "widgets": [w.as_dict() for w in self.widgets],
+            "compact_order": list(self.compact_order),
         }
 
 
@@ -222,6 +226,7 @@ def layout_from_panel(
         )
         for w in panel.get("widgets", [])
     )
+    ids = {w.id for w in widgets}
     screen = Screen(
         id="overview",
         label=_SCREEN_LABELS.get(language, _SCREEN_LABELS["en"]),
@@ -229,6 +234,7 @@ def layout_from_panel(
         grid_cols=GRID_COLS,
         grid_rows=GRID_ROWS,
         widgets=widgets,
+        compact_order=tuple(i for i in panel.get("compact_order") or () if i in ids),
     )
     screens = tuple(_area_screen(a) for a in area_screens)
     if widgets or not screens:
