@@ -75,6 +75,20 @@ def pick_area_entities(
     return sorted(picked, key=lambda p: p[1].lower())
 
 
+def _device_map(registry: Any) -> dict[str, Any]:
+    """Device id -> device entry, built once. Looking devices up through
+    registry.devices as a mapping is deprecated, and Home Assistant checks
+    the caller's stack on every such lookup to report it: done for every
+    entity on every panel change, that blocked the event loop for
+    seconds. Iterating it gives the entries (the ids on older versions)."""
+    out: dict[str, Any] = {}
+    for item in registry.devices:
+        device = registry.async_get(item) if isinstance(item, str) else item
+        if device is not None:
+            out[device.id] = device
+    return out
+
+
 def area_screens(hass: Any, area_ids: Iterable[str]) -> list[dict[str, Any]]:
     """The screens for a panel's areas, in the panel's order: each
     {"area_id", "name", "entities": [(entity_id, label), ...]}. An area
@@ -84,7 +98,7 @@ def area_screens(hass: Any, area_ids: Iterable[str]) -> list[dict[str, Any]]:
     from homeassistant.helpers import entity_registry as er
 
     areas = ar.async_get(hass)
-    devices = dr.async_get(hass).devices
+    devices = _device_map(dr.async_get(hass))
     entries = list(er.async_get(hass).entities.values())
     screens = []
     for area_id in area_ids:
