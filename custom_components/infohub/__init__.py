@@ -56,7 +56,7 @@ from .const import (
     GROUP_AKTOREN,
 )
 from .coordinator import InfoHubCoordinator
-from .entities import build_entity_groups
+from .entities import build_entity_groups, fan_speeds
 from .layout import layout_from_panel
 from .panels import (
     CREATE_FIELDS,
@@ -165,6 +165,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "light",
                         "turn_on",
                         {"entity_id": entity_id, "brightness_pct": value},
+                        blocking=False,
+                    )
+            elif domain == "fan":
+                state = hass.states.get(entity_id)
+                speeds = fan_speeds(state) if state is not None else None
+                if speeds is None:
+                    logger.warning("set_value for a fan without speeds ignored: %s", entity_id)
+                elif value <= 0:
+                    await hass.services.async_call(
+                        "fan", "turn_off", {"entity_id": entity_id}, blocking=False
+                    )
+                else:
+                    percentage = min(100, round(value * 100 / speeds))
+                    await hass.services.async_call(
+                        "fan",
+                        "set_percentage",
+                        {"entity_id": entity_id, "percentage": percentage},
                         blocking=False,
                     )
             elif domain == "cover":

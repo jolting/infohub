@@ -977,14 +977,14 @@ class InfohubPanel extends HTMLElement {
           user-select: none;
         }
         .compact-editor { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
-        .compact-list { min-width: 240px; display: grid; gap: 4px; }
+        .compact-list { flex: 0 1 280px; min-width: 220px; display: grid; gap: 4px; align-content: start; }
         .compact-row {
           display: flex; align-items: center; gap: 4px;
           padding: 6px 8px; border: 1px solid var(--divider-color); border-radius: 6px; cursor: pointer;
         }
         .compact-row.selected { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.15); }
         .compact-name { flex: 1; }
-        .compact-pages { display: flex; gap: 16px; flex-wrap: wrap; }
+        .compact-pages { display: flex; gap: 16px; flex-wrap: wrap; flex: 1 1 260px; min-width: 0; }
         .compact-page-wrap { display: grid; gap: 4px; justify-items: center; }
         .compact-page {
           position: relative; box-sizing: border-box; overflow: hidden;

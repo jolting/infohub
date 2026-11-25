@@ -144,3 +144,21 @@ def build_entity_groups(
             )
         )
     return {group_name: tuple(cfgs) for group_name, cfgs in groups.items()}
+
+
+FAN_SET_SPEED = 1  # FanEntityFeature.SET_SPEED
+
+
+def fan_speeds(state: Any) -> int | None:
+    """How many speeds a fan has (off not counted), if it can be set to
+    them; None for anything else. A fan without percentage_step is taken
+    to have 100 (whole percents)."""
+    if not state.entity_id.startswith("fan."):
+        return None
+    if not int(state.attributes.get("supported_features") or 0) & FAN_SET_SPEED:
+        return None
+    step = state.attributes.get("percentage_step") or 1
+    try:
+        return max(1, min(100, round(100 / float(step))))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 100

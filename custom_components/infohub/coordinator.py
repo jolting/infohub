@@ -52,7 +52,13 @@ from .const import (
     GROUP_WETTER,
     GTS_API_URL,
 )
-from .entities import DEFAULT_ENTITY_GROUPS, EntityConfig, all_entity_ids, find_entity_config
+from .entities import (
+    DEFAULT_ENTITY_GROUPS,
+    EntityConfig,
+    all_entity_ids,
+    fan_speeds,
+    find_entity_config,
+)
 from .websocket_server import InfoHubWebSocketServer
 
 logger = logging.getLogger(__name__)
@@ -218,6 +224,8 @@ class InfoHubCoordinator:
             # neither lives in a uniform place (state.state for
             # number/input_number, an attribute for light/cover).
             control = entity_config.type if entity_config.type in ("cover", "slider") else "toggle"
+            if control == "toggle" and fan_speeds(state) is not None:
+                control = "slider"  # a fan with speeds: off and each speed
             transformed["control"] = control
             if control == "slider":
                 domain = state.entity_id.split(".", 1)[0]
@@ -399,6 +407,12 @@ def _slider_value_and_range(
         return value, 0, 100
     if domain == "cover":
         return attrs.get("current_position"), 0, 100
+    if domain == "fan":
+        speeds = fan_speeds(state)
+        if speeds is not None:
+            percentage = attrs.get("percentage") if state.state == "on" else 0
+            value = round((percentage or 0) * speeds / 100)
+            return value, 0, speeds
     return None, None, None
 
 
