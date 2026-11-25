@@ -315,6 +315,9 @@ class InfoHubWebSocketServer:
             closed.cancel()
             if self._waiting.get(device_id) is approved:
                 del self._waiting[device_id]
+                if not approved.is_set():  # it left without being approved
+                    self._auth.pending.pop(device_id, None)
+                    self._notify_pairing()
         if not approved.is_set() or self._auth.check(device_id, None) != ISSUE:
             return False
         return await self._send_token(websocket, device_id)

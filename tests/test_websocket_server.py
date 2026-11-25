@@ -74,6 +74,23 @@ async def test_unknown_display_waits_then_is_approved():
 
 
 @pytest.mark.asyncio
+async def test_waiting_display_unlisted_when_it_leaves():
+    server, url, _ = await start(auth_with())
+    try:
+        ws = await hello(url, "r1")
+        await recv(ws)
+        assert [d["device_id"] for d in server.displays()] == ["r1"]
+        await ws.close()
+        for _ in range(20):
+            if not server.displays():
+                break
+            await asyncio.sleep(0.05)
+        assert server.displays() == []
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_wrong_or_missing_token_waits():
     auth = auth_with("r1")
     auth.issue("r1")
