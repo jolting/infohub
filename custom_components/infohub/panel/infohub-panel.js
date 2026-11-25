@@ -52,6 +52,9 @@ const STRINGS = {
     defaultPanelLabel: "Standard-Panel (Fallback für nicht zugeordnete Displays)",
     assignedDevice: "Zugeordnetes Display",
     displayLanguage: "Display-Sprache",
+    noData: "Keine Daten",
+    noDataHint: "Dieses Widget hat noch keine Entity, die es zeigen kann: unten eine hinzufügen.",
+    useEntity: (id) => `${id} verwenden`,
     screenLabel: "Bildschirm",
     screenLarge: "Groß (Querformat)",
     screenR1: "HiBy R1 (480×800 hochkant)",
@@ -119,6 +122,9 @@ const STRINGS = {
     defaultPanelLabel: "Default panel (fallback for unassigned displays)",
     assignedDevice: "Assigned display",
     displayLanguage: "Display language",
+    noData: "No data",
+    noDataHint: "This widget has no entity to show yet: add one below.",
+    useEntity: (id) => `Use ${id}`,
     screenLabel: "Screen",
     screenLarge: "Large (landscape)",
     screenR1: "HiBy R1 (480×800 portrait)",
@@ -182,6 +188,34 @@ const WIDGET_GROUPS = {
   value_tile: "custom",
   switch_tile: "aktoren",
 };
+
+// Whether a widget has something to show: an entity in its data group.
+// A clock needs none; the calendar's are set in the integration's
+// options; switches also get the entities of the panel's rooms.
+function _widgetHasData(panel, widget) {
+  const group = WIDGET_GROUPS[widget.type];
+  if (!group || group === "kalender") return true;
+  if (group === "aktoren" && (panel.areas || []).length) return true;
+  return (panel.entities || []).some((e) => e.group === group);
+}
+
+// The entity a widget of this type would obviously use, as a panel
+// entity, or null: for weather, the only weather entity there is.
+function _defaultEntity(hass, type) {
+  if (type !== "weather_current" || !hass) return null;
+  const ids = Object.keys(hass.states).filter((id) => id.startsWith("weather."));
+  if (ids.length !== 1) return null;
+  const attrs = hass.states[ids[0]].attributes || {};
+  return {
+    entity_id: ids[0],
+    label: attrs.friendly_name || ids[0],
+    group: "wetter",
+    unit: null,
+    type: "weather",
+    min_value: null,
+    max_value: null,
+  };
+}
 
 // Mirrors custom_components/infohub/widgets.py's WIDGET_CATALOG. Option
 // field names here are the wire/schema keys (must match widgets.py);
@@ -708,6 +742,11 @@ class InfohubPanel extends HTMLElement {
     // on a narrow screen a new widget goes to the end of the stack
     const extra =
       panel.screen === "r1" ? { compact_order: [..._compactOrder(panel), widgets[widgets.length - 1].id] } : {};
+    // a widget that can only use one entity gets it
+    const entity = _defaultEntity(this._hass, type);
+    if (entity && !_widgetHasData(panel, { type })) {
+      extra.entities = [...(panel.entities || []), entity];
+    }
     await this._saveWidgets(panelId, widgets, extra);
     this._render();
   }
@@ -1001,6 +1040,13 @@ class InfohubPanel extends HTMLElement {
           background: rgba(26, 26, 58, 0.9); color: #c8cce0; font-size: 11px; cursor: pointer;
         }
         .compact-box.selected { border: 2px solid var(--primary-color); }
+        .compact-box.no-data, .widget-box.no-data { border-color: var(--warning-color, #f59e0b); }
+        .no-data-badge { color: var(--warning-color, #f59e0b); font-size: 12px; }
+        .no-data-hint {
+          display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+          margin-bottom: 12px; padding: 8px 12px; border-radius: 6px;
+          border: 1px solid var(--warning-color, #f59e0b); color: var(--primary-text-color);
+        }
         .widget-box.selected { border-width: 2px; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.3); }
         .widget-box .remove-widget {
           position: absolute; top: 2px; right: 2px;
@@ -1221,6 +1267,11 @@ class InfohubPanel extends HTMLElement {
       el.style.height =
         Math.max(1, Math.min(widget.pos.rowspan, GRID_ROWS - widget.pos.row)) * CELL_PX + "px";
       el.textContent = widget.alias || catalog.label[lang];
+      if (!_widgetHasData(panel, widget)) {
+        el.classList.add("no-data");
+        el.textContent = "⚠ " + el.textContent;
+        el.title = STRINGS[lang].noDataHint;
+      }
       el.dataset.id = widget.id;
 
       const removeBtn = document.createElement("button");
@@ -1277,7 +1328,9 @@ class InfohubPanel extends HTMLElement {
         const w = byId[id];
         return `
         <div class="compact-row ${id === this._selectedWidgetId ? "selected" : ""}" data-id="${_escapeAttr(id)}">
-          <span class="compact-name">${_escape(label(w))}</span>
+          <span class="compact-name">${_escape(label(w))}${
+            _widgetHasData(panel, w) ? "" : ` <span class="no-data-badge">⚠ ${t.noData}</span>`
+          }</span>
           <button class="icon-button" data-move="-1" data-index="${i}" title="${t.moveUp}" ${i === 0 ? "disabled" : ""}>▲</button>
           <button class="icon-button" data-move="1" data-index="${i}" title="${t.moveDown}" ${i === order.length - 1 ? "disabled" : ""}>▼</button>
           <button class="icon-button" data-remove="${_escapeAttr(id)}" title="${t.delete}">✕</button>
@@ -1296,7 +1349,9 @@ class InfohubPanel extends HTMLElement {
             ${page
               .map(
                 ({ widget, y, h }) => `
-              <div class="compact-box ${widget.id === this._selectedWidgetId ? "selected" : ""}" data-id="${_escapeAttr(widget.id)}"
+              <div class="compact-box ${widget.id === this._selectedWidgetId ? "selected" : ""} ${
+                _widgetHasData(panel, widget) ? "" : "no-data"
+              }" data-id="${_escapeAttr(widget.id)}"
                 style="left:${COMPACT.margin * s}px; top:${y * s}px; width:${(COMPACT.width - 2 * COMPACT.margin) * s}px; height:${h * s}px;">
                 ${_escape(label(widget))}
               </div>`
@@ -1500,7 +1555,21 @@ class InfohubPanel extends HTMLElement {
       `;
     }
 
-    box.innerHTML = aliasHtml + optionsHtml + entitiesHtml;
+    let noDataHtml = "";
+    if (!_widgetHasData(panel, widget)) {
+      const suggestion = _defaultEntity(this._hass, widget.type);
+      noDataHtml = `
+        <div class="no-data-hint">⚠ ${t.noDataHint}
+          ${suggestion ? `<button id="use-default-entity">${_escape(t.useEntity(suggestion.entity_id))}</button>` : ""}
+        </div>`;
+    }
+    box.innerHTML = noDataHtml + aliasHtml + optionsHtml + entitiesHtml;
+    const useDefault = box.querySelector("#use-default-entity");
+    if (useDefault) {
+      useDefault.addEventListener("click", () =>
+        this._addEntity(panel.id, _defaultEntity(this._hass, widget.type))
+      );
+    }
 
     box.querySelector("#widget-alias-input").addEventListener("change", (ev) => {
       this._updateWidgetAlias(panel.id, widget.id, ev.target.value.trim() || null);
