@@ -134,17 +134,22 @@ class Layout:
     things the server doesn't send text for (weekday/month names,
     weather condition terms, etc.); everything the server *does* send
     text for (widget labels) is already localized before it gets here.
+
+    `title` is the panel's own name, which display clients show in their
+    header.
     """
 
     screens: tuple[Screen, ...]
     navigation: Navigation
     language: str = DEFAULT_LANGUAGE
+    title: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "screens": [s.as_dict() for s in self.screens],
             "navigation": self.navigation.as_dict(),
             "language": self.language,
+            "title": self.title,
         }
 
     def as_message(self) -> dict[str, Any]:
@@ -232,4 +237,5 @@ def layout_from_panel(
         screens=screens,
         navigation=Navigation(order=tuple(s.id for s in screens)),
         language=language,
+        title=panel.get("name") or "",
     )
