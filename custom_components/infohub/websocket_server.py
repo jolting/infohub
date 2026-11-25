@@ -59,6 +59,12 @@ from .layout import Layout
 logger = logging.getLogger(__name__)
 
 HELLO_TIMEOUT = 2.0
+# Longest a send to one display may take. A display that stops reading
+# (a hung client) would otherwise block the send forever once its socket
+# buffer fills, and with it whatever awaited the send: a panel edit in
+# the sidebar editor waits for the layout push. Past this the display is
+# disconnected; it reconnects and gets everything again.
+SEND_TIMEOUT = 5.0
 
 ResolvePanelFn = Callable[[str | None], "str | None"]
 # (entity_id, command, value) -> None. `value` is only meaningful for
@@ -144,8 +150,12 @@ class InfoHubWebSocketServer:
         editing the panel it's already on, takes effect immediately.
         """
         self.configure_panels(layouts, default_panel_id, resolve_panel)
-        for websocket, device_id in list(self._connections.items()):
-            await self._send_layout_for(websocket, device_id)
+        await asyncio.gather(
+            *(
+                self._send_layout_for(websocket, device_id)
+                for websocket, device_id in list(self._connections.items())
+            )
+        )
 
     def configure_button_handler(self, on_button: ButtonHandlerFn) -> None:
         """Sets the callback invoked for incoming client `button` messages."""
@@ -306,10 +316,25 @@ class InfoHubWebSocketServer:
         layout = self._layout_for_device(device_id)
         if layout is None:
             return
+        await self._send(websocket, json.dumps(layout.as_message()))
+
+    async def _send(self, websocket: WebSocketServerProtocol, message: str) -> bool:
+        """Sends one message to one display; False if it is gone, or took
+        longer than SEND_TIMEOUT (it is then disconnected)."""
         try:
-            await websocket.send(json.dumps(layout.as_message()))
+            await asyncio.wait_for(websocket.send(message), SEND_TIMEOUT)
+            return True
         except websockets.ConnectionClosed:
-            pass
+            return False
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Display %s took over %.0f s to take a message, disconnecting it",
+                self._connections.get(websocket), SEND_TIMEOUT,
+            )
+            transport = getattr(websocket, "transport", None)
+            if transport is not None:
+                transport.abort()
+            return False
 
     async def _send_full_update(self, websocket: WebSocketServerProtocol) -> None:
         message = {
@@ -317,10 +342,7 @@ class InfoHubWebSocketServer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": self._current_data,
         }
-        try:
-            await websocket.send(json.dumps(message))
-        except websockets.ConnectionClosed:
-            pass
+        await self._send(websocket, json.dumps(message))
 
     async def broadcast_full_update(self, data: dict[str, Any]) -> None:
         """Sends a full data update to all clients."""
@@ -391,12 +413,9 @@ class InfoHubWebSocketServer:
         if not self._clients:
             return
 
-        disconnected = set()
-        for client in list(self._clients):
-            try:
-                await client.send(message)
-            except websockets.ConnectionClosed:
-                disconnected.add(client)
+        clients = list(self._clients)
+        sent = await asyncio.gather(*(self._send(client, message) for client in clients))
+        disconnected = {client for client, ok in zip(clients, sent) if not ok}
 
         self._clients -= disconnected
         if disconnected:

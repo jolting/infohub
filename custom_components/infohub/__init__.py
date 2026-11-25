@@ -21,6 +21,7 @@ Still open: Medikamente wurden komplett verworfen, kein Ersatz vorgesehen.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -236,13 +237,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         await coordinator.async_apply_entities(build_entity_groups(_all_entities(current_panels)))
 
+    refresh_lock = asyncio.Lock()
+
+    async def _refresh_serialized() -> None:
+        """One _refresh() at a time, in the order the edits came."""
+        async with refresh_lock:
+            await _refresh()
+
     async def _on_panels_changed(change_type: str, item_id: str, item: dict) -> None:
         """collection.notify_changes() awaits every registered listener via
         asyncio.gather() - it must be a coroutine function, not a plain
         @callback (that crashed with "An asyncio.Future, a coroutine or
         an awaitable is required" the moment a panel was actually edited).
+
+        The push runs as a task of its own: the editor's save waits for
+        these listeners, and must not wait on the displays as well.
         """
-        await _refresh()
+        hass.async_create_task(_refresh_serialized())
 
     unsub_panels = panel_collection.async_add_listener(_on_panels_changed)
 
