@@ -34,6 +34,15 @@
 const STRINGS = {
   de: {
     addPanel: "+ Panel anlegen",
+    displays: "Displays",
+    noDisplays: "Noch kein Display hat sich gemeldet.",
+    displayWaiting: "wartet auf Freigabe",
+    displayWrongToken: "falscher oder fehlender Schlüssel",
+    displayApproved: "freigegeben, noch nicht verbunden",
+    displayPaired: "gekoppelt",
+    approve: "Freigeben",
+    forget: "Entfernen",
+    forgetConfirm: (id) => `${id} entfernen? Das Display muss danach neu freigegeben werden.`,
     noPanels: "Noch keine Panels.",
     delete: "Löschen",
     standard: "Standard",
@@ -85,6 +94,15 @@ const STRINGS = {
   },
   en: {
     addPanel: "+ Add panel",
+    displays: "Displays",
+    noDisplays: "No display has connected yet.",
+    displayWaiting: "waiting for approval",
+    displayWrongToken: "wrong or missing token",
+    displayApproved: "approved, not connected since",
+    displayPaired: "paired",
+    approve: "Approve",
+    forget: "Remove",
+    forgetConfirm: (id) => `Remove ${id}? It will have to be approved again.`,
     noPanels: "No panels yet.",
     delete: "Delete",
     standard: "Default",
@@ -285,9 +303,17 @@ class InfohubPanel extends HTMLElement {
 
   connectedCallback() {
     this._render();
+    // Displays waiting for approval appear without a reload.
+    if (!this._displayTimer) {
+      this._displayTimer = setInterval(() => this._refreshDisplays(), 5000);
+    }
   }
 
   disconnectedCallback() {
+    if (this._displayTimer) {
+      clearInterval(this._displayTimer);
+      this._displayTimer = null;
+    }
     // Clears _subscribedConnection too, not just the subscription itself
     // - otherwise the `hass` setter's identity check would keep thinking
     // we're subscribed once this element is reconnected (HA's sidebar
@@ -456,6 +482,64 @@ class InfohubPanel extends HTMLElement {
     });
   }
 
+  // -- Displays (pairing) --------------------------------------------------
+
+  async _refreshDisplays() {
+    if (!this._hass) return;
+    try {
+      this._displays = await this._call("infohub/displays/list");
+    } catch (err) {
+      console.error("infohub/displays/list", err);
+      return;
+    }
+    this._renderDisplays();
+  }
+
+  async _displayAction(command, deviceId) {
+    try {
+      this._displays = await this._call(command, { device_id: deviceId });
+    } catch (err) {
+      window.alert(this._t("saveFailedPrefix") + (err && err.message ? err.message : err));
+    }
+    this._renderDisplays();
+  }
+
+  _renderDisplays() {
+    const el = this.querySelector("#display-list");
+    if (!el) return;
+    const t = STRINGS[this._lang()];
+    const rows = (this._displays || [])
+      .slice()
+      .sort((a, b) => Number(a.approved) - Number(b.approved) || a.device_id.localeCompare(b.device_id));
+    el.innerHTML =
+      rows
+        .map((d) => {
+          let state;
+          if (!d.approved) state = d.reason === "token" ? t.displayWrongToken : t.displayWaiting;
+          else state = d.paired ? t.displayPaired : t.displayApproved;
+          const where = d.address ? ` · ${_escape(d.address)}` : "";
+          const button = d.approved
+            ? `<button class="icon-button" data-forget="${_escapeAttr(d.device_id)}" title="${t.forget}">✕</button>`
+            : `<button data-approve="${_escapeAttr(d.device_id)}">${t.approve}</button>`;
+          return `
+        <div class="panel-row">
+          <span class="name">${_escape(d.device_id)} <span class="hint">${state}${where}</span></span>
+          ${button}
+        </div>`;
+        })
+        .join("") || `<div class="hint">${t.noDisplays}</div>`;
+    el.querySelectorAll("[data-approve]").forEach((btn) =>
+      btn.addEventListener("click", () => this._displayAction("infohub/displays/approve", btn.dataset.approve))
+    );
+    el.querySelectorAll("[data-forget]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        if (window.confirm(t.forgetConfirm(btn.dataset.forget))) {
+          this._displayAction("infohub/displays/forget", btn.dataset.forget);
+        }
+      })
+    );
+  }
+
   async _loadKnownDevices() {
     try {
       return await this._call("infohub/devices/list");
@@ -581,6 +665,7 @@ class InfohubPanel extends HTMLElement {
           font-weight: 400;
           margin: 8px 0 16px;
         }
+        .infohub-subtitle { font-size: 16px; font-weight: 500; margin-bottom: 8px; }
         .infohub-layout {
           display: grid;
           grid-template-columns: 260px 1fr;
@@ -811,10 +896,16 @@ class InfohubPanel extends HTMLElement {
       <div class="infohub-root">
         <div class="infohub-title">InfoHub</div>
         <div class="infohub-layout">
-          <ha-card class="infohub-card">
-            <div id="panel-list"></div>
-            <button class="add-panel-btn" id="add-panel">${t.addPanel}</button>
-          </ha-card>
+          <div style="display:grid; gap:16px; align-content:start;">
+            <ha-card class="infohub-card">
+              <div id="panel-list"></div>
+              <button class="add-panel-btn" id="add-panel">${t.addPanel}</button>
+            </ha-card>
+            <ha-card class="infohub-card">
+              <div class="infohub-subtitle">${t.displays}</div>
+              <div id="display-list"></div>
+            </ha-card>
+          </div>
           <ha-card class="infohub-card" id="panel-editor"></ha-card>
         </div>
       </div>
@@ -851,6 +942,8 @@ class InfohubPanel extends HTMLElement {
     this.querySelector("#add-panel").addEventListener("click", () => this._createPanel());
 
     this._renderEditor(selected);
+    this._renderDisplays();
+    if (this._displays === undefined) this._refreshDisplays();
   }
 
   _renderEditor(panel) {

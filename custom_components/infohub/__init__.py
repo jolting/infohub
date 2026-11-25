@@ -36,6 +36,7 @@ from homeassistant.helpers import collection
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.storage import Store
 
 from .areas import area_entity_configs, area_screens
 
@@ -67,6 +68,7 @@ from .panels import (
     resolve_panel_id,
     union_panel_entities,
 )
+from .pairing import DisplayAuth
 from .websocket_server import InfoHubWebSocketServer
 
 logger = logging.getLogger(__name__)
@@ -178,7 +180,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         logger.warning("Unbekanntes Action-Kommando ignoriert: %s", command)
 
-    server = InfoHubWebSocketServer(host="0.0.0.0", port=port)
+    server = InfoHubWebSocketServer(
+        host="0.0.0.0", port=port, auth=await _async_display_auth(hass, entry)
+    )
     server.configure_panels(_build_layouts(panels), default_panel_id, _resolve_panel)
     server.configure_action_handler(_resolve_action)
 
@@ -305,6 +309,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     websocket_api.async_register_command(hass, _ws_list_devices)
 
+    @websocket_api.websocket_command({vol.Required("type"): "infohub/displays/list"})
+    @callback
+    def _ws_list_displays(hass: HomeAssistant, connection, msg: dict) -> None:
+        """Approved displays and those waiting for approval."""
+        connection.send_result(msg["id"], server.displays())
+
+    @websocket_api.websocket_command(
+        {vol.Required("type"): "infohub/displays/approve", vol.Required("device_id"): str}
+    )
+    @callback
+    def _ws_approve_display(hass: HomeAssistant, connection, msg: dict) -> None:
+        server.approve(msg["device_id"])
+        connection.send_result(msg["id"], server.displays())
+
+    @websocket_api.websocket_command(
+        {vol.Required("type"): "infohub/displays/forget", vol.Required("device_id"): str}
+    )
+    @websocket_api.async_response
+    async def _ws_forget_display(hass: HomeAssistant, connection, msg: dict) -> None:
+        await server.forget(msg["device_id"])
+        connection.send_result(msg["id"], server.displays())
+
+    for command in (_ws_list_displays, _ws_approve_display, _ws_forget_display):
+        websocket_api.async_register_command(hass, command)
+
     # cache_headers=False, solange das Panel aktiv weiterentwickelt wird -
     # mit True setzt HA hier Cache-Control: max-age=31 Tage, dann sieht
     # der Browser Aenderungen erst nach explizitem Cache-Leeren.
@@ -348,6 +377,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+async def _async_display_auth(hass: HomeAssistant, entry: ConfigEntry) -> DisplayAuth:
+    """The pairing store (pairing.py), kept in .storage/infohub_displays.
+    At its first start the displays Home Assistant already knows (their
+    connectivity sensors) are approved, so they keep working."""
+    store: Store[dict] = Store(hass, 1, f"{DOMAIN}_displays")
+    data = await store.async_load()
+
+    @callback
+    def _save(new_data: dict) -> None:
+        store.async_delay_save(lambda: new_data, 1)
+
+    auth = DisplayAuth(data, _save)
+    known = [
+        reg.unique_id[len("display_") : -len("_connected")]
+        for reg in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if reg.domain == "binary_sensor"
+        and reg.unique_id.startswith("display_")
+        and reg.unique_id.endswith("_connected")
+    ]
+    auth.grandfather(known)
+    return auth
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -114,6 +114,26 @@ try:
 except Exception:
     DEVICE_ID = "infopanel1"
 
+# The token Home Assistant gives this display once it is approved in the
+# InfoHub panel (a "paired" message), sent with every hello after that.
+TOKEN_PATH = "infohub-token"
+
+
+def _read_token():
+    try:
+        with open(TOKEN_PATH) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _save_token(token):
+    try:
+        with open(TOKEN_PATH, "w") as f:
+            f.write(token)
+    except OSError as e:
+        print("Can't save the token to", TOKEN_PATH, e)
+
 # Theme colors
 THEME = {
     "bg": 0x1a1a2e,
@@ -213,6 +233,8 @@ WIND_DIRS = {
 STRINGS = {
     "de": {
         "connecting": "Verbinde...",
+        "pairing": "Nicht freigegeben",
+        "approve_in_ha": "Freigeben: %s in Home Assistant",
         "connected": "Verbunden",
         "disconnected": "Getrennt",
         "forecast": "Vorhersage",
@@ -246,6 +268,8 @@ STRINGS = {
     },
     "en": {
         "connecting": "Connecting...",
+        "pairing": "Not approved",
+        "approve_in_ha": "Approve %s in Home Assistant",
         "connected": "Connected",
         "disconnected": "Disconnected",
         "forecast": "Forecast",
@@ -4048,6 +4072,30 @@ class InfoHubDisplay:
         else:
             draw_weather_icon(container, icon_type, size)
 
+    def set_pairing(self, waiting):
+        """Waiting for approval in Home Assistant: says so in the header
+        (the title until a layout gives the panel's name)."""
+        if self.status_label:
+            if waiting:
+                self.status_label.set_text(_t("pairing"))
+                self.status_label.set_style_text_color(lv.color_hex(THEME["warning"]), 0)
+            else:
+                self.set_connected(self.connected)
+        label = getattr(self, "_pairing_label", None)
+        if waiting and label is None and self.scr is not None:
+            label = lv.label(self.scr)
+            label.set_width(DISPLAY_WIDTH - 60)
+            label.set_long_mode(lv.label.LONG_MODE.WRAP)
+            label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+            label.set_style_text_font(FONT[24], 0)
+            label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
+            label.set_text(_safe_text(_t("approve_in_ha") % DEVICE_ID))
+            label.align(lv.ALIGN.CENTER, 0, 0)
+            self._pairing_label = label
+        elif not waiting and label is not None:
+            label.delete()
+            self._pairing_label = None
+
     def set_connected(self, connected):
         """Update connection status"""
         self.connected = connected
@@ -4521,6 +4569,17 @@ class InfoHubDisplay:
                 self.apply_layout(parsed)
                 return
 
+            if msg_type == "pairing_required":
+                self.set_pairing(True)
+                return
+
+            if msg_type == "paired":
+                token = parsed.get("token")
+                if token:
+                    _save_token(token)
+                self.set_pairing(False)
+                return
+
             if msg_type == "full_update":
                 data = parsed.get("data", {})
                 for group, group_data in data.items():
@@ -4848,7 +4907,11 @@ async def websocket_client(display):
                 display._sock = sock
                 display._sock_broken = False
 
-                hello = json.dumps({"type": "hello", "device_id": DEVICE_ID}).encode()
+                hello_msg = {"type": "hello", "device_id": DEVICE_ID}
+                token = _read_token()
+                if token:
+                    hello_msg["token"] = token
+                hello = json.dumps(hello_msg).encode()
                 sock.send(_ws_encode_frame(hello))
 
                 sock.setblocking(False)

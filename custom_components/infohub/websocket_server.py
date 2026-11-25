@@ -52,9 +52,14 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import websockets
-from websockets.server import WebSocketServerProtocol
+
+try:  # websockets 13+ serves through its asyncio implementation
+    from websockets.asyncio.server import ServerConnection as WebSocketServerProtocol
+except ImportError:  # older versions
+    from websockets.server import WebSocketServerProtocol
 
 from .layout import Layout
+from .pairing import ISSUE, OK, DisplayAuth
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +90,14 @@ PRESSES = ("short", "long")
 class InfoHubWebSocketServer:
     """WebSocket server that pushes per-device layout and shared data to display clients."""
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, auth: DisplayAuth | None = None):
         self.host = host
         self.port = port
+        # None: every display is let in (tests, and nothing else)
+        self._auth = auth
+        # device_id -> the waiting connection's event, set on approval
+        self._waiting: dict[str, asyncio.Event] = {}
+        self._pairing_listeners: list[Callable[[], None]] = []
         self._clients: set[WebSocketServerProtocol] = set()
         self._server: websockets.WebSocketServer | None = None
         self._current_data: dict[str, Any] = {}
@@ -217,7 +227,11 @@ class InfoHubWebSocketServer:
         client_addr = websocket.remote_address
         logger.info("Client verbunden: %s", client_addr)
 
-        device_id = await self._await_hello(websocket)
+        device_id, token = await self._await_hello(websocket)
+        if self._auth is not None and not await self._authenticate(
+            websocket, device_id, token
+        ):
+            return
         if device_id:
             self._known_devices[device_id] = datetime.now(timezone.utc).isoformat()
             logger.info("Client identifiziert: %s -> device_id=%s", client_addr, device_id)
@@ -241,21 +255,111 @@ class InfoHubWebSocketServer:
             if device_id:
                 self._set_device_state(device_id, websocket)
 
-    async def _await_hello(self, websocket: WebSocketServerProtocol) -> str | None:
-        """Waits briefly for a {"type": "hello", "device_id": ...} message.
-
-        Older/unmodified clients that never send this simply time out
-        here and fall back to the default panel - no behavior change for
-        them.
+    async def _await_hello(
+        self, websocket: WebSocketServerProtocol
+    ) -> tuple[str | None, str | None]:
+        """Waits briefly for {"type": "hello", "device_id": ..., "token": ...}:
+        (device_id, token), either None if missing. A client that never
+        sends one times out here; with pairing on it is then turned away.
         """
         try:
             message = await asyncio.wait_for(websocket.recv(), timeout=HELLO_TIMEOUT)
             data = json.loads(message)
-            if data.get("type") == "hello":
-                return data.get("device_id")
-        except (TimeoutError, ValueError, websockets.ConnectionClosed):
+            if isinstance(data, dict) and data.get("type") == "hello":
+                device_id = data.get("device_id")
+                token = data.get("token")
+                return (
+                    device_id if isinstance(device_id, str) and device_id else None,
+                    token if isinstance(token, str) and token else None,
+                )
+        except (TimeoutError, asyncio.TimeoutError, ValueError, websockets.ConnectionClosed):
             pass
-        return None
+        return None, None
+
+    async def _authenticate(
+        self, websocket: WebSocketServerProtocol, device_id: str | None, token: str | None
+    ) -> bool:
+        """Lets a display in if it is paired; gives an approved one without
+        a token its token; holds any other until it is approved in the
+        panel (approve()) or goes away. False: it never got in."""
+        assert self._auth is not None
+        verdict = self._auth.check(device_id, token)
+        if verdict == OK:
+            return True
+        if verdict == ISSUE:
+            return await self._send_token(websocket, device_id)
+        if not device_id:
+            logger.warning("Display at %s sent no device_id, turned away", websocket.remote_address)
+            await self._send(websocket, json.dumps({"type": "pairing_required", "device_id": None}))
+            await websocket.close()
+            return False
+
+        address = websocket.remote_address[0] if websocket.remote_address else None
+        logger.info("Display %s at %s waits for approval", device_id, address)
+        self._auth.note_pending(device_id, address)
+        self._notify_pairing()
+        await self._send(
+            websocket, json.dumps({"type": "pairing_required", "device_id": device_id})
+        )
+        approved = asyncio.Event()
+        previous = self._waiting.get(device_id)
+        if previous is not None:
+            previous.set()  # an older connection of the same display: let it go
+        self._waiting[device_id] = approved
+        waiter = asyncio.ensure_future(approved.wait())
+        closed = asyncio.ensure_future(websocket.wait_closed())
+        try:
+            await asyncio.wait({waiter, closed}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            closed.cancel()
+            if self._waiting.get(device_id) is approved:
+                del self._waiting[device_id]
+        if not approved.is_set() or self._auth.check(device_id, None) != ISSUE:
+            return False
+        return await self._send_token(websocket, device_id)
+
+    async def _send_token(self, websocket: WebSocketServerProtocol, device_id: str) -> bool:
+        assert self._auth is not None
+        token = self._auth.issue(device_id)
+        self._notify_pairing()
+        logger.info("Display %s paired", device_id)
+        return await self._send(websocket, json.dumps({"type": "paired", "token": token}))
+
+    def approve(self, device_id: str) -> None:
+        """Approves a display; one waiting now is let in at once."""
+        assert self._auth is not None
+        self._auth.approve(device_id)
+        waiting = self._waiting.get(device_id)
+        if waiting is not None:
+            waiting.set()
+        self._notify_pairing()
+
+    async def forget(self, device_id: str) -> None:
+        """Revokes a display: it has to be approved again, and its open
+        connections are closed."""
+        assert self._auth is not None
+        self._auth.forget(device_id)
+        for websocket, connected_id in list(self._connections.items()):
+            if connected_id == device_id:
+                await websocket.close()
+        self._notify_pairing()
+
+    def displays(self) -> list[dict[str, Any]]:
+        """Approved and waiting displays, for the panel."""
+        return self._auth.displays() if self._auth is not None else []
+
+    def add_pairing_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """listener() is called when a display waits, pairs or is revoked."""
+        self._pairing_listeners.append(listener)
+        return lambda: self._pairing_listeners.remove(listener)
+
+    def _notify_pairing(self) -> None:
+        for listener in list(self._pairing_listeners):
+            try:
+                listener()
+            except Exception:
+                logger.exception("Pairing listener failed")
 
     async def _handle_client_message(
         self, client_addr: Any, message: str, device_id: str | None = None
