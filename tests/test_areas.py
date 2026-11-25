@@ -120,3 +120,22 @@ def test_area_screens_never_looks_devices_up_as_a_mapping(monkeypatch):
     assert screens == [
         {"area_id": "office", "name": "Office", "entities": [("light.desk", "Desk lamp")]}
     ]
+
+
+def test_area_controls_by_domain():
+    from infohub.areas import area_entity_configs
+
+    screens = [{"area_id": "a", "name": "A", "entities": [
+        ("light.desk", "Desk"), ("cover.blind", "Blind"), ("scene.relax", "Relax"),
+        ("media_player.tv", "TV"), ("humidifier.big", "Humidifier"), ("fan.ceiling", "Fan")]}]
+    types = {c["entity_id"]: c["type"] for c in area_entity_configs(screens)}
+    assert types == {"light.desk": None, "cover.blind": "cover", "scene.relax": "scene",
+                     "media_player.tv": "media", "humidifier.big": None, "fan.ceiling": None}
+
+
+def test_scenes_media_and_humidifiers_are_picked():
+    entries = [entry("scene.relax", area_id="office", name="Relax"),
+               entry("media_player.tv", area_id="office", name="TV"),
+               entry("humidifier.big", area_id="office", name="Humidifier")]
+    assert dict(pick_area_entities(entries, {}, "office")) == {
+        "scene.relax": "Relax", "media_player.tv": "TV", "humidifier.big": "Humidifier"}

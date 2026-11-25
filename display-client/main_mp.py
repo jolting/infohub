@@ -2845,6 +2845,10 @@ class InfoHubDisplay:
         options = options or {}
         card_w = options.get("_card_w") or 300
         only = options.get("entities")
+        # a room can have more rows than fit: the card scrolls up and down
+        card.add_flag(lv.obj.FLAG.SCROLLABLE)
+        card.set_scroll_dir(lv.DIR.VER)
+        card.set_scrollbar_mode(lv.SCROLLBAR_MODE.ACTIVE)
         self._switch_tiles.append({
             "card": card, "card_w": card_w, "rows": {},
             "only": set(only) if only is not None else None,
@@ -4310,6 +4314,49 @@ class InfoHubDisplay:
         hit.move_background()
         return hit
 
+    def _create_row_button(self, card, symbol, on_tap):
+        """A square button, styled like the toggles, for a scene or media
+        row; on_tap() on a tap (not at the end of a swipe or a scroll)."""
+        size = SWITCH_TOGGLE_W
+        btn = lv.obj(card)
+        btn.set_size(size, size)
+        btn.set_style_radius(6, 0)
+        btn.set_style_bg_color(lv.color_hex(0x111111), 0)
+        btn.set_style_bg_opa(255, 0)
+        btn.set_style_border_width(2, 0)
+        btn.set_style_border_color(lv.color_hex(0x333333), 0)
+        btn.set_style_bg_color(lv.color_hex(THEME["primary"]), lv.STATE.PRESSED)
+        btn.set_style_pad_all(0, 0)
+        btn.remove_flag(lv.obj.FLAG.SCROLLABLE)
+        lbl = lv.label(btn)
+        lbl.set_text(symbol)
+        lbl.set_style_text_color(lv.color_hex(THEME["primary"]), 0)
+        lbl.set_style_text_font(lv.font_montserrat_24, 0)
+        lbl.center()
+
+        def tapped(e):
+            if self._touch_moved <= TAP_SLOP:
+                on_tap()
+
+        btn.add_event_cb(tapped, lv.EVENT.CLICKED, None)
+        return btn
+
+    def _create_row_hit_action(self, card, on_tap):
+        """A transparent target over a whole row that calls on_tap()."""
+        hit = lv.obj(card)
+        hit.set_style_bg_opa(0, 0)
+        hit.set_style_border_width(0, 0)
+        hit.set_style_pad_all(0, 0)
+        hit.remove_flag(lv.obj.FLAG.SCROLLABLE)
+
+        def tapped(e):
+            if self._touch_moved <= TAP_SLOP:
+                on_tap()
+
+        hit.add_event_cb(tapped, lv.EVENT.CLICKED, None)
+        hit.move_background()
+        return hit
+
     def _position_toggle_paddle(self, toggle):
         """Moves/colors a toggle's paddle to match toggle["state"] -
         used both for real updates (update_aktoren()) and the optimistic
@@ -4360,7 +4407,7 @@ class InfoHubDisplay:
             lbl = lv.label(btn)
             lbl.set_text(symbol)
             lbl.set_style_text_color(lv.color_hex(THEME["primary"]), 0)
-            lbl.set_style_text_font(FONT[14], 0)
+            lbl.set_style_text_font(lv.font_montserrat_16, 0)
             lbl.center()
 
             btn.add_event_cb(
@@ -4369,9 +4416,10 @@ class InfoHubDisplay:
             return btn
 
         return {
-            "open": make_button("open_cover", _t("cover_open")),
-            "stop": make_button("stop_cover", _t("cover_stop")),
-            "close": make_button("close_cover", _t("cover_close")),
+            # symbols: the words didn't fit the buttons
+            "open": make_button("open_cover", lv.SYMBOL.UP),
+            "stop": make_button("stop_cover", lv.SYMBOL.STOP),
+            "close": make_button("close_cover", lv.SYMBOL.DOWN),
         }
 
     def _create_value_slider(self, card, rows, entity_id):
@@ -4421,11 +4469,55 @@ class InfoHubDisplay:
         label_lbl = lv.label(card)
         label_lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
         label_lbl.set_style_text_font(FONT[SWITCH_LABEL_SIZE], 0)
-        label_lbl.set_width(max(60, card_w - (110 if control == "slider" else 50 + SWITCH_TOGGLE_W * 2)))
+        if control == "media":
+            label_w = card_w - 4 * (SWITCH_TOGGLE_W + 6) - 40
+        elif control == "slider":
+            label_w = card_w - 110
+        else:
+            label_w = card_w - 50 - SWITCH_TOGGLE_W * 2
+        label_lbl.set_width(max(60, label_w))
+        # one line, "..." where it doesn't fit (DOTS needs a fixed height)
+        label_lbl.set_long_mode(lv.label.LONG_MODE.DOTS)
+        try:
+            label_lbl.set_height(FONT[SWITCH_LABEL_SIZE].line_height)
+        except Exception:
+            pass
 
         if control == "cover":
             buttons = self._create_cover_buttons(card, entity_id)
             return {"control": "cover", "label": label_lbl, "buttons": buttons}
+        if control == "dimmer":
+            # a toggle on the right, the level slider under the label
+            toggle = self._create_toggle_switch(card, entity_id)
+            hit = self._create_row_hit(card, entity_id, toggle)
+            slider, value_label = self._create_value_slider(card, rows, entity_id)
+            value_label.add_flag(lv.obj.FLAG.HIDDEN)
+            return {
+                "control": "dimmer", "label": label_lbl, "switch": toggle, "hit": hit,
+                "slider": slider, "value_label": value_label, "dragging": False,
+                "_unit": "", "objs": [label_lbl, toggle["track"], hit, slider, value_label],
+            }
+        if control == "scene":
+            button = self._create_row_button(
+                card, lv.SYMBOL.PLAY, lambda eid=entity_id: self.send_action(eid, "activate"))
+            hit = self._create_row_hit_action(
+                card, lambda eid=entity_id: self.send_action(eid, "activate"))
+            return {"control": "scene", "label": label_lbl, "button": button, "hit": hit,
+                    "objs": [label_lbl, button, hit]}
+        if control == "media":
+            sub = lv.label(card)
+            sub.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
+            sub.set_style_text_font(FONT[14], 0)
+            sub.set_long_mode(lv.label.LONG_MODE.DOTS)
+            buttons = {}
+            for command, symbol in (("media_play_pause", lv.SYMBOL.PLAY),
+                                    ("media_next_track", lv.SYMBOL.NEXT),
+                                    ("volume_down", lv.SYMBOL.MINUS),
+                                    ("volume_up", lv.SYMBOL.PLUS)):
+                buttons[command] = self._create_row_button(
+                    card, symbol, lambda eid=entity_id, c=command: self.send_action(eid, c))
+            return {"control": "media", "label": label_lbl, "sub": sub, "buttons": buttons,
+                    "objs": [label_lbl, sub] + list(buttons.values())}
         if control == "slider":
             slider, value_label = self._create_value_slider(card, rows, entity_id)
             return {
@@ -4441,6 +4533,10 @@ class InfoHubDisplay:
         _create_aktor_row()) - used both when an entity drops out of the
         "aktoren" group and when its control type changes between
         updates (rare, but cheaper to handle than to special-case away)."""
+        if "objs" in row:
+            for obj in row["objs"]:
+                obj.delete()
+            return
         row["label"].delete()
         control = row["control"]
         if control == "cover":
@@ -4466,6 +4562,35 @@ class InfoHubDisplay:
             row["buttons"]["open"].align(lv.ALIGN.TOP_RIGHT, -100, row_y + 11)
             row["buttons"]["stop"].align(lv.ALIGN.TOP_RIGHT, -60, row_y + 11)
             row["buttons"]["close"].align(lv.ALIGN.TOP_RIGHT, -20, row_y + 11)
+        elif control == "dimmer":
+            row["label"].set_pos(15, row_y + 4)
+            row["switch"]["track"].align(lv.ALIGN.TOP_RIGHT, -20, row_y)
+            slider_w = max(60, card_w - SWITCH_TOGGLE_W - 70)
+            row["slider"].set_size(slider_w, 18)
+            row["slider"].set_pos(20, row_y + SWITCH_TOGGLE_H - 26)
+            # the label's band toggles; the slider's doesn't
+            row["hit"].set_size(card_w - SWITCH_TOGGLE_W - 50, SWITCH_TOGGLE_H // 2)
+            row["hit"].set_pos(0, row_y)
+        elif control == "scene":
+            try:
+                line_h = FONT[SWITCH_LABEL_SIZE].line_height
+            except Exception:
+                line_h = 20
+            row["label"].set_pos(15, row_y + (SWITCH_TOGGLE_H - line_h) // 2)
+            row["button"].align(lv.ALIGN.TOP_RIGHT, -20, row_y + (SWITCH_TOGGLE_H - SWITCH_TOGGLE_W) // 2)
+            row["hit"].set_size(card_w - 20, SWITCH_ROW_H - 6)
+            row["hit"].set_pos(0, row_y + (SWITCH_TOGGLE_H - SWITCH_ROW_H) // 2 + 3)
+        elif control == "media":
+            buttons_w = 4 * (SWITCH_TOGGLE_W + 6)
+            text_w = max(60, card_w - buttons_w - 40)
+            row["label"].set_pos(15, row_y + 4)
+            row["sub"].set_width(text_w)
+            row["sub"].set_pos(15, row_y + SWITCH_TOGGLE_H // 2 + 8)
+            x = -20
+            for command in ("volume_up", "volume_down", "media_next_track", "media_play_pause"):
+                row["buttons"][command].align(
+                    lv.ALIGN.TOP_RIGHT, x, row_y + (SWITCH_TOGGLE_H - SWITCH_TOGGLE_W) // 2)
+                x -= SWITCH_TOGGLE_W + 6
         elif control == "slider":
             row["label"].set_pos(15, row_y)
             row["slider"].set_pos(15, row_y + 34)
@@ -4503,7 +4628,7 @@ class InfoHubDisplay:
         except (TypeError, ValueError):
             value = min_v
         value = max(min_v, min(max_v, value))
-        row["slider"].set_value(value, lv.ANIM.OFF)
+        row["slider"].set_value(value, False)
 
         unit = entity_data.get("unit", "")
         row["value_label"].set_text(_safe_text(str(value) + (" " + unit if unit else "")))
@@ -4524,7 +4649,11 @@ class InfoHubDisplay:
             # lv.switch()-based rows - this row's touch target (and the
             # rocker-switch visual) needs more vertical room.
             row_h = SWITCH_ROW_H
-            all_items = sorted(data.items(), key=lambda kv: kv[1].get("label", kv[0]))
+            # lights and fans first, then other levels, covers, media, scenes
+            rank = {"toggle": 0, "dimmer": 0, "slider": 1, "cover": 2, "media": 3, "scene": 4}
+            all_items = sorted(data.items(), key=lambda kv: (
+                rank.get(kv[1].get("control") or "toggle", 5),
+                str(kv[1].get("label", kv[0])).lower()))
             for tile in self._switch_tiles:
                 card = tile["card"]
                 rows = tile["rows"]
@@ -4556,6 +4685,23 @@ class InfoHubDisplay:
 
                     if control == "cover":
                         pass  # stateless buttons, nothing to reflect
+                    elif control == "scene":
+                        pass
+                    elif control == "media":
+                        state = str(entity_data.get("state", ""))
+                        title = entity_data.get("title") or ""
+                        artist = entity_data.get("artist") or ""
+                        sub = " - ".join(t for t in (title, artist) if t) or state
+                        row["sub"].set_text(_safe_text(sub))
+                        play = row["buttons"]["media_play_pause"].get_child(0)
+                        play.set_text(lv.SYMBOL.PAUSE if state == "playing" else lv.SYMBOL.PLAY)
+                    elif control == "dimmer":
+                        state = str(entity_data.get("state", "")).lower()
+                        row["switch"]["state"] = state == "on"
+                        self._position_toggle_paddle(row["switch"])
+                        if not row.get("dragging"):
+                            self._update_aktor_slider(row, entity_data)
+                        row["slider"].set_style_opa(255 if state == "on" else 120, 0)
                     elif control == "slider":
                         row["_unit"] = entity_data.get("unit", "")
                         if not row.get("dragging"):

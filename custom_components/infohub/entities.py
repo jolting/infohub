@@ -162,3 +162,34 @@ def fan_speeds(state: Any) -> int | None:
         return max(1, min(100, round(100 / float(step))))
     except (TypeError, ValueError, ZeroDivisionError):
         return 100
+
+
+def level_control(state: Any) -> tuple[int, int, int] | None:
+    """(value, min, max) of the level an on/off entity can also be set
+    to, for a room screen's dimmer row (a toggle and a slider), or None:
+    a dimmable light's brightness (1-100 %), a fan's speed (1 to its
+    number of speeds), a humidifier's target humidity (its own range).
+    The value is 0 while a light or fan is off."""
+    domain = state.entity_id.split(".", 1)[0]
+    attrs = state.attributes
+    on = state.state == "on"
+    if domain == "light":
+        modes = attrs.get("supported_color_modes") or []
+        if not any(mode != "onoff" for mode in modes):
+            return None
+        brightness = attrs.get("brightness")
+        value = round(brightness / 255 * 100) if on and brightness is not None else 0
+        return value, 1, 100
+    if domain == "fan":
+        speeds = fan_speeds(state)
+        if speeds is None:
+            return None
+        percentage = attrs.get("percentage") if on else 0
+        return round((percentage or 0) * speeds / 100), 1, speeds
+    if domain == "humidifier":
+        low = int(attrs.get("min_humidity") or 0)
+        high = int(attrs.get("max_humidity") or 100)
+        target = attrs.get("humidity")
+        value = int(round(float(target))) if target is not None else low
+        return value, low, max(high, low + 1)
+    return None

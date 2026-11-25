@@ -138,6 +138,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        if command == "activate":
+            if domain not in ("scene", "script"):
+                logger.warning("activate for a non-scene ignored: %s", entity_id)
+                return
+            await hass.services.async_call(
+                domain, "turn_on", {"entity_id": entity_id}, blocking=False
+            )
+            return
+
+        if command in MEDIA_COMMANDS:
+            if domain != "media_player":
+                logger.warning("%s for a non-media player ignored: %s", command, entity_id)
+                return
+            await hass.services.async_call(
+                "media_player", command, {"entity_id": entity_id}, blocking=False
+            )
+            return
+
         if command in ("open_cover", "close_cover", "stop_cover"):
             if domain != "cover":
                 logger.warning("Cover-Kommando fuer Nicht-Cover-Entity ignoriert: %s", entity_id)
@@ -184,6 +202,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         {"entity_id": entity_id, "percentage": percentage},
                         blocking=False,
                     )
+            elif domain == "humidifier":
+                await hass.services.async_call(
+                    "humidifier",
+                    "set_humidity",
+                    {"entity_id": entity_id, "humidity": int(value)},
+                    blocking=False,
+                )
             elif domain == "cover":
                 await hass.services.async_call(
                     "cover",
@@ -394,6 +419,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
+
+# what a media row's buttons send (each a media_player service)
+MEDIA_COMMANDS = (
+    "media_play_pause",
+    "media_next_track",
+    "media_previous_track",
+    "volume_up",
+    "volume_down",
+)
 
 
 async def _async_display_auth(hass: HomeAssistant, entry: ConfigEntry) -> DisplayAuth:

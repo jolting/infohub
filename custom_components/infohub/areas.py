@@ -25,7 +25,11 @@ from typing import Any, Iterable
 
 from .const import GROUP_AKTOREN
 
-AREA_DOMAINS = ("light", "fan", "cover")
+AREA_DOMAINS = ("light", "fan", "cover", "humidifier", "media_player", "scene")
+
+# The switch_tile control an area entity gets, by domain (coordinator.py
+# makes a toggle a dimmer where the entity has a level)
+AREA_CONTROLS = {"cover": "cover", "media_player": "media", "scene": "scene"}
 
 
 def _device_name(device: Any) -> str | None:
@@ -118,14 +122,16 @@ def area_screens(hass: Any, area_ids: Iterable[str]) -> list[dict[str, Any]]:
 def area_entity_configs(screens: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """The entity configs (panels.py's stored shape) the coordinator
     tracks for area screens: each one a switch_tile row, so actionable;
-    a cover as open/stop/close buttons, the rest as toggles."""
+    a cover as open/stop/close buttons, a media player as its own row, a
+    scene as a button, the rest as toggles (dimmers where they have a
+    level)."""
     return [
         {
             "entity_id": entity_id,
             "label": label,
             "group": GROUP_AKTOREN,
             "unit": None,
-            "type": "cover" if entity_id.startswith("cover.") else None,
+            "type": AREA_CONTROLS.get(entity_id.split(".", 1)[0]),
             "min_value": None,
             "max_value": None,
         }

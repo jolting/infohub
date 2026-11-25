@@ -987,7 +987,8 @@ class InfohubPanel extends HTMLElement {
         .compact-pages { display: flex; gap: 16px; flex-wrap: wrap; flex: 1 1 260px; min-width: 0; }
         .compact-page-wrap { display: grid; gap: 4px; justify-items: center; }
         .compact-page {
-          position: relative; box-sizing: border-box; overflow: hidden;
+          /* content-box: the frame sits outside the 480x800 drawing area */
+          position: relative; box-sizing: content-box; overflow: hidden;
           background: #0a0a1e; border: 6px solid #222; border-radius: 14px;
         }
         .compact-header {

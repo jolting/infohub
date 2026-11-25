@@ -58,6 +58,7 @@ from .entities import (
     all_entity_ids,
     fan_speeds,
     find_entity_config,
+    level_control,
 )
 from .websocket_server import InfoHubWebSocketServer
 
@@ -223,9 +224,20 @@ class InfoHubCoordinator:
             # needs a current value and range, derived per HA domain since
             # neither lives in a uniform place (state.state for
             # number/input_number, an attribute for light/cover).
-            control = entity_config.type if entity_config.type in ("cover", "slider") else "toggle"
-            if control == "toggle" and fan_speeds(state) is not None:
-                control = "slider"  # a fan with speeds: off and each speed
+            control = (
+                entity_config.type
+                if entity_config.type in ("cover", "slider", "scene", "media")
+                else "toggle"
+            )
+            level = level_control(state) if control == "toggle" else None
+            if level is not None:
+                # a toggle and a slider: brightness, fan speed, humidity
+                control = "dimmer"
+                transformed["value"], transformed["min"], transformed["max"] = level
+            if control == "media":
+                attrs = state.attributes
+                transformed["title"] = attrs.get("media_title") or attrs.get("app_name") or ""
+                transformed["artist"] = attrs.get("media_artist") or ""
             transformed["control"] = control
             if control == "slider":
                 domain = state.entity_id.split(".", 1)[0]

@@ -35,3 +35,34 @@ def test_speed_and_percentage_round_trip():
         assert round(reported * speeds / 100) == speed
         if speed:
             assert min(100, round(speed * 100 / speeds)) in (17, 33, 50, 67, 83, 100)
+
+
+from infohub.entities import level_control
+
+
+def state(entity_id, on=True, **attributes):
+    return SimpleNamespace(entity_id=entity_id, state="on" if on else "off", attributes=attributes)
+
+
+def test_dimmable_light():
+    assert level_control(state("light.desk", brightness=128, supported_color_modes=["brightness"])) == (50, 1, 100)
+    assert level_control(state("light.desk", on=False, supported_color_modes=["color_temp"])) == (0, 1, 100)
+
+
+def test_on_off_light_is_a_toggle():
+    assert level_control(state("light.plug", supported_color_modes=["onoff"])) is None
+    assert level_control(state("light.old")) is None
+
+
+def test_fan_speed():
+    fan_state = state("fan.office", percentage=33, percentage_step=16.666666666666668, supported_features=61)
+    assert level_control(fan_state) == (2, 1, 6)
+
+
+def test_humidifier_target():
+    h = state("humidifier.big", humidity=55, min_humidity=40, max_humidity=80)
+    assert level_control(h) == (55, 40, 80)
+
+
+def test_switch_has_no_level():
+    assert level_control(state("switch.printer")) is None
