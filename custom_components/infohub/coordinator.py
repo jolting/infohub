@@ -56,6 +56,7 @@ from .entities import (
     DEFAULT_ENTITY_GROUPS,
     EntityConfig,
     all_entity_ids,
+    daily_from_twice_daily,
     fan_speeds,
     find_entity_config,
     level_control,
@@ -275,22 +276,25 @@ class InfoHubCoordinator:
         return transformed
 
     async def _async_get_forecast(self, entity_id: str) -> list | None:
-        """Calls weather.get_forecasts, mirroring infohub/ha_client.py's get_forecast()."""
-        try:
-            response = await self._hass.services.async_call(
-                "weather",
-                "get_forecasts",
-                {"entity_id": entity_id, "type": "daily"},
-                blocking=True,
-                return_response=True,
-            )
-        except Exception as err:  # noqa: BLE001 - service call can fail per weather integration
-            logger.debug("Forecast-Abruf fehlgeschlagen fuer %s: %s", entity_id, err)
-            return None
-
-        if not response:
-            return None
-        return response.get(entity_id, {}).get("forecast")
+        """Calls weather.get_forecasts for a daily forecast; for a weather
+        entity without one (NWS has hourly and twice-daily only), the
+        twice-daily forecast merged into days."""
+        for kind in ("daily", "twice_daily"):
+            try:
+                response = await self._hass.services.async_call(
+                    "weather",
+                    "get_forecasts",
+                    {"entity_id": entity_id, "type": kind},
+                    blocking=True,
+                    return_response=True,
+                )
+            except Exception as err:  # noqa: BLE001 - not every type is supported
+                logger.debug("No %s forecast for %s: %s", kind, entity_id, err)
+                continue
+            forecast = (response or {}).get(entity_id, {}).get("forecast")
+            if forecast:
+                return forecast if kind == "daily" else daily_from_twice_daily(forecast)
+        return None
 
     async def _async_poll_gts(self, now: Any = None) -> None:
         """Fetches the current GTS value and refreshes the weather entities with it.

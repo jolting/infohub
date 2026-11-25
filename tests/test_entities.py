@@ -66,3 +66,18 @@ def test_humidifier_target():
 
 def test_switch_has_no_level():
     assert level_control(state("switch.printer")) is None
+
+
+from infohub.entities import daily_from_twice_daily
+
+
+def test_twice_daily_becomes_daily():
+    periods = [
+        {"datetime": "2026-11-25T18:00", "is_daytime": False, "temperature": 45, "condition": "clear-night"},
+        {"datetime": "2026-11-26T06:00", "is_daytime": True, "temperature": 72, "condition": "sunny"},
+        {"datetime": "2026-11-26T18:00", "is_daytime": False, "temperature": 47, "condition": "clear-night"},
+        {"datetime": "2026-11-27T06:00", "is_daytime": True, "temperature": 70, "condition": "cloudy"},
+    ]
+    days = daily_from_twice_daily(periods)
+    assert [(d["temperature"], d["templow"]) for d in days] == [(None, 45), (72, 47), (70, None)]
+    assert days[1]["condition"] == "sunny" and "is_daytime" not in days[1]

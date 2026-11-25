@@ -193,3 +193,24 @@ def level_control(state: Any) -> tuple[int, int, int] | None:
         value = int(round(float(target))) if target is not None else low
         return value, low, max(high, low + 1)
     return None
+
+
+def daily_from_twice_daily(periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A weather.get_forecasts "twice_daily" forecast (day and night
+    periods, as NWS gives) as a daily one: each day period's temperature
+    and condition, with the night after it as templow. A night first
+    (asked in the evening) makes a day of its own with only templow."""
+    days: list[dict[str, Any]] = []
+    for period in periods:
+        if period.get("is_daytime", True):
+            day = {k: v for k, v in period.items() if k != "is_daytime"}
+            day["templow"] = None
+            days.append(day)
+        elif days and days[-1].get("templow") is None and days[-1].get("temperature") is not None:
+            days[-1]["templow"] = period.get("temperature")
+        else:
+            night = {k: v for k, v in period.items() if k != "is_daytime"}
+            night["templow"] = night.pop("temperature", None)
+            night["temperature"] = None
+            days.append(night)
+    return days

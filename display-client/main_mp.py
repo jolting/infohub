@@ -3922,9 +3922,11 @@ class InfoHubDisplay:
                     dt = day.get("datetime", "")
                     col["day"].set_text(_get_day_name(dt))
 
-                    t_high = day.get("temperature", "--")
-                    t_low = day.get("templow",
-                                    day.get("temp_low", "--"))
+                    t_high = day.get("temperature")
+                    t_low = day.get("templow", day.get("temp_low"))
+                    # a forecast that starts in the evening has no high
+                    t_high = "--" if t_high is None else t_high
+                    t_low = "--" if t_low is None else t_low
                     try:
                         t_high = int(round(float(t_high)))
                     except Exception:
