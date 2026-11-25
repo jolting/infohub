@@ -93,6 +93,14 @@ COMPACT_HEIGHT = {
     "value_tile": None,
     "switch_tile": None,
 }
+# None above: the widget takes the rest of the page, if at least this
+# much is left (else it starts a page of its own).
+COMPACT_MIN_HEIGHT = {
+    "weather_current": 380,
+    "calendar_month": 420,
+    "value_tile": 160,
+    "switch_tile": 220,
+}
 
 # The size the hand-laid-out cards are drawn for. A card given less
 # room is fitted: see _fit_card().
@@ -4789,7 +4797,14 @@ class InfoHubDisplay:
         w = DISPLAY_WIDTH - 2 * m
         pages, page, y = [], [], top
         for widget in sorted(widgets, key=grid_order):
-            h = COMPACT_HEIGHT.get(widget.get("type")) or bottom - top
+            kind = widget.get("type")
+            h = COMPACT_HEIGHT.get(kind)
+            if h is None:
+                # the rest of this page, if enough is left; else a page
+                if page and bottom - y < COMPACT_MIN_HEIGHT.get(kind, bottom - top):
+                    pages.append(page)
+                    page, y = [], top
+                h = bottom - y
             h = min(h, bottom - top)
             if page and y + h > bottom:
                 pages.append(page)
@@ -4838,6 +4853,11 @@ class InfoHubDisplay:
                 _fit_card(card, fit[0], fit[1])
                 if widget_type == "weather_current":
                     self._scene_fit = fit
+                    # its big labels shrink with it, or they overrun their boxes
+                    k = min(fit)
+                    if k < 0.95:
+                        _set_big_font(self.weather_temp_label, max(24, int(54 * k)))
+                        _set_big_font(self.weather_cond_label, max(16, int(30 * k)))
 
             if widget_type == "weather_current":
                 self.weather_card = card
