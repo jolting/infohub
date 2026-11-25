@@ -547,6 +547,27 @@ def _set_big_font(label, size):
     label.set_style_transform_pivot_y(0, 0)
 
 
+# A weather entity's own units (its *_unit attributes); metric if missing
+_UNIT_TO_METRIC = {
+    "mph": 1.609344, "m/s": 3.6, "kn": 1.852, "ft/s": 1.09728, "km/h": 1.0,
+    "mi": 1.609344, "km": 1.0, "m": 0.001,
+    "in": 25.4, "mm": 1.0, "cm": 10.0,
+}
+
+
+def _unit(attrs, key, default):
+    u = attrs.get(key)
+    return u if isinstance(u, str) and u else default
+
+
+def _to_metric(value, unit):
+    """value in unit -> km/h, km or mm (the sky scene's scales)."""
+    try:
+        return float(value) * _UNIT_TO_METRIC.get(unit, 1.0)
+    except (TypeError, ValueError):
+        return value
+
+
 def init_unicode_fonts(base_dir):
     """After lv.init(): Montserrat from base_dir/UNICODE_FONT for every
     size in FONT (accents, Cyrillic, ...), falling back to the emoji in
@@ -2030,7 +2051,7 @@ class InfoHubDisplay:
 
         # Temperature - large, in the sky area above overlay
         self.weather_temp_label = lv.label(card)
-        self.weather_temp_label.set_text("-- C")
+        self.weather_temp_label.set_text("--")
         self.weather_temp_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
         _set_big_font(self.weather_temp_label, 54)
         self.weather_temp_label.set_pos(30, 45)
@@ -2047,6 +2068,7 @@ class InfoHubDisplay:
         gts_bg.remove_flag(lv.obj.FLAG.SCROLLABLE)
 
         gts_header = lv.label(card)
+        self._gts_parts = [gts_bg, gts_header]
         gts_header.set_text("GTS")
         gts_header.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
         gts_header.set_style_text_font(FONT[14], 0)
@@ -2065,6 +2087,11 @@ class InfoHubDisplay:
         self.gts_estimate_label.set_style_text_font(
             FONT[14], 0)
         self.gts_estimate_label.set_pos(420, 83)
+        # GTS (a German gardening figure, by German postcode): shown only
+        # once the integration has one
+        self._gts_parts += [self.gts_label, self.gts_estimate_label]
+        for part in self._gts_parts:
+            part.add_flag(lv.obj.FLAG.HIDDEN)
 
         # Condition text
         self.weather_cond_label = lv.label(card)
@@ -2198,7 +2225,7 @@ class InfoHubDisplay:
             col["icon_container"] = icon_cont
 
             temp_lbl = lv.label(card)
-            temp_lbl.set_text("--/-- C")
+            temp_lbl.set_text("--/--")
             temp_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
             temp_lbl.set_style_text_font(FONT[16], 0)
             temp_lbl.set_pos(col_x + 50 - 30, 635)
@@ -2568,7 +2595,7 @@ class InfoHubDisplay:
         temp_header.set_pos(60, 220)
 
         self.indoor_temp_label = lv.label(card)
-        self.indoor_temp_label.set_text("-- C")
+        self.indoor_temp_label.set_text("--")
         self.indoor_temp_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
         self.indoor_temp_label.set_style_text_font(FONT[24], 0)
         self.indoor_temp_label.set_pos(60, 248)
@@ -3800,12 +3827,23 @@ class InfoHubDisplay:
                 precipitation = attrs.get("precipitation",
                                           attrs.get("rain", "0"))
 
-                self.weather_temp_label.set_text(_fmt1(temp) + " C")
+                temp_unit = _unit(attrs, "temperature_unit", "°C")
+                wind_unit = _unit(attrs, "wind_speed_unit", "km/h")
+                pressure_unit = _unit(attrs, "pressure_unit", "hPa")
+                vis_unit = _unit(attrs, "visibility_unit", "km")
+                precip_unit = _unit(attrs, "precipitation_unit", "mm")
+                self._weather_temp_unit = temp_unit
+                self.weather_temp_label.set_text(_safe_text(_fmt1(temp) + " " + temp_unit))
                 self.weather_cond_label.set_text(
                     _translate_condition(condition))
 
                 # GTS update
                 gts = entity_data.get("gts")
+                for part in getattr(self, "_gts_parts", ()):
+                    if gts is None:
+                        part.add_flag(lv.obj.FLAG.HIDDEN)
+                    else:
+                        part.remove_flag(lv.obj.FLAG.HIDDEN)
                 if gts is not None and self.gts_label:
                     gts_val = int(round(float(gts)))
                     self.gts_label.set_text(str(gts_val))
@@ -3832,22 +3870,22 @@ class InfoHubDisplay:
                 self.weather_detail_labels["humidity"].set_text(
                     _fmt1(humidity) + " %")
                 self.weather_detail_labels["precipitation"].set_text(
-                    _fmt1(precipitation) + " mm")
+                    _safe_text(_fmt1(precipitation) + " " + precip_unit))
 
                 wind_dir = _bearing_to_compass(wind_bearing)
-                wind_text = _fmt1(wind_speed) + " km/h"
+                wind_text = _fmt1(wind_speed) + " " + wind_unit
                 if wind_dir:
                     wind_text += " " + wind_dir
                 self.weather_detail_labels["wind"].set_text(wind_text)
                 self.weather_detail_labels["pressure"].set_text(
-                    _fmt1(pressure) + " hPa")
+                    _safe_text(_fmt1(pressure) + " " + pressure_unit))
                 self.weather_detail_labels["visibility"].set_text(
-                    _fmt1(visibility) + " km")
+                    _safe_text(_fmt1(visibility) + " " + vis_unit))
 
                 # Update scene intensity from live data
                 self._update_scene_intensity(
-                    cloud_coverage, precipitation,
-                    wind_speed, visibility)
+                    cloud_coverage, _to_metric(precipitation, precip_unit),
+                    _to_metric(wind_speed, wind_unit), _to_metric(visibility, vis_unit))
 
                 forecast = entity_data.get("forecast")
                 if forecast:
@@ -3895,8 +3933,9 @@ class InfoHubDisplay:
                         t_low = int(round(float(t_low)))
                     except Exception:
                         pass
-                    col["temp"].set_text(
-                        str(t_high) + "/" + str(t_low) + " C")
+                    col["temp"].set_text(_safe_text(
+                        str(t_high) + "/" + str(t_low) + " "
+                        + getattr(self, "_weather_temp_unit", "°C")))
 
                     precip = day.get("precipitation_probability",
                                      day.get("precipitation", "--"))
@@ -4150,9 +4189,12 @@ class InfoHubDisplay:
             for entity_id, entity_data in data.items():
                 state = str(entity_data.get('state', '--'))
                 if 'temperature' in entity_id:
-                    self.indoor_temp_label.set_text(_fmt1(state) + ' C')
+                    unit = entity_data.get('unit') or '°C'
+                    self.indoor_temp_label.set_text(_safe_text(_fmt1(state) + ' ' + unit))
                     try:
                         temp_val = float(state)
+                        if 'F' in unit:  # the comfort score is in Celsius
+                            temp_val = (temp_val - 32) * 5 / 9
                     except Exception:
                         pass
                 elif 'humidity' in entity_id:

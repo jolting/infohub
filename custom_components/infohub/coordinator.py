@@ -215,8 +215,10 @@ class InfoHubCoordinator:
             "label": entity_config.label,
             "state": state.state,
         }
-        if entity_config.unit:
-            transformed["unit"] = entity_config.unit
+        # the panel's unit, else the entity's own (an indoor thermometer in °F)
+        unit = entity_config.unit or state.attributes.get("unit_of_measurement")
+        if unit:
+            transformed["unit"] = unit
 
         if group == GROUP_AKTOREN:
             # Which actuator control the client should render this row as -
