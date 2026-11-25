@@ -75,6 +75,34 @@ SWITCH_TOGGLE_H = 60
 SWITCH_LABEL_SIZE = 14
 TAP_SLOP = 30
 
+# Narrow displays (a phone-sized 480x800, say) can't show the panel's
+# 24x14 grid, laid out for 1920x1200: there a screen's widgets are
+# stacked full width instead, column by column in the order the grid
+# has them, over as many swipeable pages as they need. None: compact on
+# displays narrower than 800px.
+COMPACT_LAYOUT = None
+COMPACT_MARGIN = 8   # around the stack, and between the cards in it
+# A widget's height in the stack; None: a page of its own.
+COMPACT_HEIGHT = {
+    "clock": 280,
+    "weather_current": None,
+    "indoor_climate": 350,
+    "power_gauge": 470,
+    "waste_next": 520,
+    "calendar_month": None,
+    "value_tile": None,
+    "switch_tile": None,
+}
+
+# The size the hand-laid-out cards are drawn for. A card given less
+# room is fitted: see _fit_card().
+NATIVE_SIZE = {
+    "weather_current": (560, 700),
+    "indoor_climate": (560, 350),
+    "power_gauge": (560, 490),
+    "waste_next": (560, 560),
+}
+
 # Stabile Geraete-ID, mit der sich dieser Client beim Server meldet (siehe
 # _ws_encode_frame()/"hello"-Nachricht) - der InfoHub-Sidebar-Panel kann
 # darueber ein bestimmtes Panel-Layout genau diesem Geraet zuordnen.
@@ -454,6 +482,37 @@ class _EmojiPack:
         })
         self.cache[cp] = (dsc, data)
         return dsc
+
+
+_BIG_FONTS = {}
+
+
+def _sized_font(size):
+    """Montserrat at any size from the TTF init_unicode_fonts() loaded,
+    made on first use; None without it (callers then scale FONT[24])."""
+    if not _UNICODE or not _unicode_keep:
+        return None
+    font = _BIG_FONTS.get(size)
+    if font is None:
+        ttf_data = _unicode_keep[0]
+        font = lv.tiny_ttf_create_data(ttf_data, len(ttf_data), size)
+        font.fallback = FONT[24]
+        _BIG_FONTS[size] = font
+    return font
+
+
+def _set_big_font(label, size):
+    """label in a font `size` px high: a real font where there is one, else
+    FONT[24] scaled up. Scaling draws through a layer, and LVGL hangs
+    where it can't allocate one (the HiBy R1), so avoid it if possible."""
+    font = _sized_font(size)
+    if font is not None:
+        label.set_style_text_font(font, 0)
+        return
+    label.set_style_text_font(FONT[24], 0)
+    label.set_style_transform_scale(size * 256 // 24, 0)
+    label.set_style_transform_pivot_x(0, 0)
+    label.set_style_transform_pivot_y(0, 0)
 
 
 def init_unicode_fonts(base_dir):
@@ -878,6 +937,53 @@ def _draw_rect(parent, x, y, w, h, color, radius=0, opa=255):
     return r
 
 
+def _is_compact():
+    if COMPACT_LAYOUT is not None:
+        return COMPACT_LAYOUT
+    return DISPLAY_WIDTH < 800
+
+
+# below this a dimension is detail (a 2px rule, a 5px snowflake), kept
+_FIT_MIN = 24
+
+
+def _fit_card(card, sx, sy):
+    """Squeezes a card drawn for its native size into its real one.
+
+    The card's own children are moved by the factors sx, sy (<= 1);
+    text keeps its size. A plain shape (no children of its own) is
+    scaled too, along each side longer than _FIT_MIN - a square one
+    (an arc, a glow) by the smaller factor, staying round. Anything
+    else keeps its size and stays centred where it was: a container
+    holding a drawn icon, a fixed-width label. A label sized to its
+    text keeps its left edge, so text changed later grows the same way.
+    """
+    card.update_layout()
+    for i in range(card.get_child_count()):
+        c = card.get_child(i)
+        x, y = c.get_x(), c.get_y()
+        w, h = c.get_width(), c.get_height()
+        if c.has_class(lv.label_class):
+            if c.get_style_width(0) == lv.SIZE_CONTENT:
+                c.set_pos(int(x * sx), int(y * sy))
+            else:
+                c.set_pos(int((x + w / 2) * sx - w / 2), int(y * sy))
+            continue
+        if c.get_child_count() == 0:
+            if w == h and w > _FIT_MIN:
+                s = min(sx, sy)
+                nw = nh = int(w * s)
+            else:
+                nw = int(w * sx) if w > _FIT_MIN else w
+                nh = int(h * sy) if h > _FIT_MIN else h
+            c.set_size(nw, nh)
+            c.set_pos(int((x + w / 2) * sx - nw / 2),
+                      int((y + h / 2) * sy - nh / 2))
+        else:
+            c.set_pos(int((x + w / 2) * sx - w / 2),
+                      int((y + h / 2) * sy - h / 2))
+
+
 def _draw_muelltonne(parent, cx, cy, s, color, color_light):
     """Draw a realistic German Muelltonne (wheeled bin)."""
     bw = int(64 * s)
@@ -1030,6 +1136,9 @@ class InfoHubDisplay:
         self.connected = False
         self.scr = None
         self.status_label = None
+        self.title_label = None
+        self._header = None
+        self._battery = None
         # Set by websocket_client() once connected, cleared once closed -
         # lets send_action() reach the live socket from a switch-tap
         # callback without threading it through every function call.
@@ -1049,6 +1158,7 @@ class InfoHubDisplay:
         self._is_night = False
         self._scene_is_night = None
         self._weather_show_scene = True
+        self._scene_fit = (1.0, 1.0)
 
         # Sky scene object pools
         self._scene_sky_bands = []
@@ -1370,17 +1480,88 @@ class InfoHubDisplay:
         header.set_style_radius(0, 0)
         header.remove_flag(lv.obj.FLAG.CLICKABLE)
 
-        title = lv.label(header)
-        title.set_text("InfoHub")
-        title.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        title.set_style_text_font(FONT[24], 0)
-        title.align(lv.ALIGN.LEFT_MID, 30, 0)
+        self._header = header
+
+        # the panel's name, from the layout (apply_layout())
+        self.title_label = lv.label(header)
+        self.title_label.set_text("")
+        self.title_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
+        self.title_label.set_style_text_font(FONT[24], 0)
+        self.title_label.set_long_mode(lv.label.LONG_MODE.DOTS)
+        self.title_label.set_width(DISPLAY_WIDTH - 260)
+        self.title_label.align(lv.ALIGN.LEFT_MID, 30, 0)
 
         self.status_label = lv.label(header)
         self.status_label.set_text(_t("connecting"))
         self.status_label.set_style_text_color(lv.color_hex(THEME["warning"]), 0)
         self.status_label.set_style_text_font(FONT[16], 0)
         self.status_label.align(lv.ALIGN.RIGHT_MID, -30, 0)
+
+    def set_battery(self, percent, charging=False):
+        """Shows a battery in the header, right of the status: an outline
+        filled to `percent` (0-100; None hides it), green while charging,
+        amber at 20 % or less, red at 10 % or less. For a display that
+        knows its own battery; the device's own code calls it."""
+        if self._battery is None:
+            if percent is None:
+                return
+            box = lv.obj(self._header)
+            box.set_size(80, 30)
+            box.set_style_bg_opa(0, 0)
+            box.set_style_border_width(0, 0)
+            box.set_style_pad_all(0, 0)
+            box.remove_flag(lv.obj.FLAG.CLICKABLE)
+            box.remove_flag(lv.obj.FLAG.SCROLLABLE)
+            box.align(lv.ALIGN.RIGHT_MID, -16, 0)
+            body = lv.obj(box)
+            body.set_size(30, 16)
+            body.set_pos(0, 7)
+            body.set_style_bg_opa(0, 0)
+            body.set_style_border_width(2, 0)
+            body.set_style_radius(3, 0)
+            body.set_style_pad_all(0, 0)
+            body.remove_flag(lv.obj.FLAG.CLICKABLE)
+            body.remove_flag(lv.obj.FLAG.SCROLLABLE)
+            nub = lv.obj(box)
+            nub.set_size(3, 8)
+            nub.set_pos(30, 11)
+            nub.set_style_border_width(0, 0)
+            nub.set_style_radius(1, 0)
+            nub.remove_flag(lv.obj.FLAG.CLICKABLE)
+            fill = lv.obj(box)
+            fill.set_pos(4, 11)
+            fill.set_style_border_width(0, 0)
+            fill.set_style_radius(1, 0)
+            fill.remove_flag(lv.obj.FLAG.CLICKABLE)
+            text = lv.label(box)
+            text.set_style_text_font(FONT[16], 0)
+            text.set_style_text_color(lv.color_hex(THEME["text"]), 0)
+            text.align(lv.ALIGN.LEFT_MID, 38, 0)
+            self._battery = (box, body, nub, fill, text)
+            # to the parent, so it stays put when its text changes width
+            self.status_label.align(lv.ALIGN.RIGHT_MID, -(16 + 80 + 12), 0)
+        box, body, nub, fill, text = self._battery
+        if percent is None:
+            box.add_flag(lv.obj.FLAG.HIDDEN)
+            self.status_label.align(lv.ALIGN.RIGHT_MID, -30, 0)
+            return
+        box.remove_flag(lv.obj.FLAG.HIDDEN)
+        percent = max(0, min(100, int(percent)))
+        if charging:
+            color = THEME["success"]
+        elif percent <= 10:
+            color = THEME["error"]
+        elif percent <= 20:
+            color = THEME["warning"]
+        else:
+            color = THEME["text"]
+        c = lv.color_hex(color)
+        body.set_style_border_color(c, 0)
+        nub.set_style_bg_color(c, 0)
+        fill.set_style_bg_color(c, 0)
+        fill.set_size(max(1, 22 * percent // 100), 8)
+        text.set_text("%d%%" % percent)
+        self.status_label.align(lv.ALIGN.RIGHT_MID, -(16 + 80 + 12), 0)
 
     def _create_gradient_background(self):
         """Create a smooth multi-layer gradient background (night sky effect)"""
@@ -1586,10 +1767,15 @@ class InfoHubDisplay:
         import random
         random.seed(int(time.time()))
         self._weather_show_scene = (options or {}).get("show_scene", True)
+        self._scene_fit = (1.0, 1.0)
 
-        # Enable corner clipping and remove padding for edge-to-edge scene
-        card.set_style_clip_corner(True, 0)
+        # Remove padding for edge-to-edge scene. No clip_corner: LVGL draws
+        # a clip_corner object through a layer of its own size, and where
+        # that layer can't be allocated (the HiBy R1) it retries forever,
+        # hanging the client. The top and bottom sky bands take the card's
+        # radius instead, so its corners stay round.
         card.set_style_pad_all(0, 0)
+        card_radius = card.get_style_radius(0)
 
         # --- Sky gradient bands (5 layers for smoother gradient) ---
         self._scene_sky_bands = []
@@ -1600,7 +1786,7 @@ class InfoHubDisplay:
             band.set_style_bg_color(lv.color_hex(0x4682B4), 0)
             band.set_style_bg_opa(255, 0)
             band.set_style_border_width(0, 0)
-            band.set_style_radius(0, 0)
+            band.set_style_radius(card_radius if y in (0, 520) else 0, 0)
             band.remove_flag(lv.obj.FLAG.CLICKABLE)
             band.remove_flag(lv.obj.FLAG.SCROLLABLE)
             if not self._weather_show_scene:
@@ -1814,11 +2000,8 @@ class InfoHubDisplay:
         self.weather_temp_label = lv.label(card)
         self.weather_temp_label.set_text("-- C")
         self.weather_temp_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.weather_temp_label.set_style_text_font(FONT[24], 0)
+        _set_big_font(self.weather_temp_label, 54)
         self.weather_temp_label.set_pos(30, 45)
-        self.weather_temp_label.set_style_transform_scale(576, 0)
-        self.weather_temp_label.set_style_transform_pivot_x(0, 0)
-        self.weather_temp_label.set_style_transform_pivot_y(0, 0)
 
         # GTS (Gruenlandtemperatursumme) - top right
         gts_bg = lv.obj(card)
@@ -1855,11 +2038,8 @@ class InfoHubDisplay:
         self.weather_cond_label = lv.label(card)
         self.weather_cond_label.set_text("--")
         self.weather_cond_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
-        self.weather_cond_label.set_style_text_font(FONT[24], 0)
+        _set_big_font(self.weather_cond_label, 30)
         self.weather_cond_label.set_pos(30, 120)
-        self.weather_cond_label.set_style_transform_scale(320, 0)
-        self.weather_cond_label.set_style_transform_pivot_x(0, 0)
-        self.weather_cond_label.set_style_transform_pivot_y(0, 0)
 
         # Separator
         sep = lv.obj(card)
@@ -2233,6 +2413,8 @@ class InfoHubDisplay:
             return
         import random
         self._scene_frame += 1
+        # the scene moves in its native 560px coordinates (see _fit_card)
+        sx, sy = self._scene_fit
 
         # Rain drops - fall down with wind drift
         for i, drop in enumerate(self._scene_rain_drops):
@@ -2242,7 +2424,7 @@ class InfoHubDisplay:
                 if self._rain_y[i] > 450 or self._rain_x[i] > 555:
                     self._rain_y[i] = float(random.randint(-30, -5))
                     self._rain_x[i] = float(random.randint(10, 540))
-                drop.set_pos(int(self._rain_x[i]), int(self._rain_y[i]))
+                drop.set_pos(int(self._rain_x[i] * sx), int(self._rain_y[i] * sy))
 
         # Snow dots - drift and fall slowly
         for i, dot in enumerate(self._scene_snow_dots):
@@ -2256,7 +2438,7 @@ class InfoHubDisplay:
                     self._snow_x[i] = 5.0
                 elif self._snow_x[i] > 545:
                     self._snow_x[i] = 545.0
-                dot.set_pos(int(self._snow_x[i]), int(self._snow_y[i]))
+                dot.set_pos(int(self._snow_x[i] * sx), int(self._snow_y[i] * sy))
 
         # Clouds - gentle horizontal drift
         for i, cloud in enumerate(self._scene_clouds):
@@ -2266,7 +2448,7 @@ class InfoHubDisplay:
                     self._cloud_dir[i] = -abs(self._cloud_dir[i])
                 elif self._cloud_x[i] < -20:
                     self._cloud_dir[i] = abs(self._cloud_dir[i])
-                cloud.set_x(int(self._cloud_x[i]))
+                cloud.set_x(int(self._cloud_x[i] * sx))
 
         # Lightning flash (every ~3 seconds) + scene flash overlay
         if self._lightning_active:
@@ -2291,7 +2473,7 @@ class InfoHubDisplay:
                 import math
                 self._fog_x_offset[i] = math.sin(
                     self._scene_frame * 0.1 + i * 1.5) * 10
-                bar.set_x(int((560 - bar.get_width()) // 2 +
+                bar.set_x(int((560 * sx - bar.get_width()) // 2 +
                               self._fog_x_offset[i]))
 
     # ------------------------------------------------------------------
@@ -2670,9 +2852,27 @@ class InfoHubDisplay:
             colon_offsets = [200]
             block_w = offsets[-1] + digit_w
 
-        content_h = 226  # Digit-Hoehe (150) + Wochentag/Datum darunter
+        # Positions are from the card's edge (no padding), below its
+        # title (15 px down, about 20 high). Digits too big for what is
+        # left (HH:MM:SS, a narrow display, a short card) are drawn
+        # smaller; the date below keeps its size.
+        card.set_style_pad_all(0, 0)
+        title_h = 40
+        avail_w = card_w - 30
+        avail_h = card_h - title_h - 10
+        k = min(1.0, avail_w / block_w, (avail_h - 76) / digit_h)
+        if k < 1.0:
+            offsets = [int(o * k) for o in offsets]
+            colon_offsets = [int(o * k) for o in colon_offsets]
+            digit_w, digit_h = int(digit_w * k), int(digit_h * k)
+            seg_w = max(4, int(seg_w * k))
+            block_w = offsets[-1] + digit_w
+        dot = max(6, int(14 * k))
+        date_y = digit_h + 15
+
+        content_h = date_y + 61  # digits + weekday/date below them
         content_x0 = max(0, (card_w - block_w) // 2)
-        content_y0 = max(0, (card_h - content_h) // 2)
+        content_y0 = title_h + max(0, (avail_h - content_h) // 2)
 
         self.clock_digits = []
         for dx in offsets:
@@ -2682,10 +2882,10 @@ class InfoHubDisplay:
 
         self.clock_colon_dots = []
         for cx in colon_offsets:
-            dot1 = _draw_rect(card, content_x0 + cx, content_y0 + 40, 14, 14,
-                              THEME["primary"], 7)
-            dot2 = _draw_rect(card, content_x0 + cx, content_y0 + 100, 14, 14,
-                              THEME["primary"], 7)
+            dot1 = _draw_rect(card, content_x0 + cx, content_y0 + digit_h * 4 // 15,
+                              dot, dot, THEME["primary"], dot // 2)
+            dot2 = _draw_rect(card, content_x0 + cx, content_y0 + digit_h * 2 // 3,
+                              dot, dot, THEME["primary"], dot // 2)
             self.clock_colon_dots.append(dot1)
             self.clock_colon_dots.append(dot2)
 
@@ -2694,7 +2894,7 @@ class InfoHubDisplay:
         self.clock_weekday_label.set_text("--")
         self.clock_weekday_label.set_style_text_color(lv.color_hex(THEME["text"]), 0)
         self.clock_weekday_label.set_style_text_font(FONT[24], 0)
-        self.clock_weekday_label.set_pos(content_x0, content_y0 + 165)
+        self.clock_weekday_label.set_pos(content_x0, content_y0 + date_y)
         self.clock_weekday_label.set_width(block_w)
         self.clock_weekday_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
 
@@ -2702,7 +2902,7 @@ class InfoHubDisplay:
         self.clock_date_label.set_text("--")
         self.clock_date_label.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
         self.clock_date_label.set_style_text_font(FONT[16], 0)
-        self.clock_date_label.set_pos(content_x0, content_y0 + 200)
+        self.clock_date_label.set_pos(content_x0, content_y0 + date_y + 35)
         self.clock_date_label.set_width(block_w)
         self.clock_date_label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
 
@@ -2718,10 +2918,22 @@ class InfoHubDisplay:
         except (TypeError, ValueError):
             months_shown = 2
         self._cal_months_shown = 1 if months_shown == 1 else 2
+        card_w = options.get("_card_w") or 730
+        card_h = options.get("_card_h") or 1070
+        # Narrower than drawn for (730px): one month, events below it,
+        # the grid's cells as large as the width allows.
+        stacked = card_w < 730
+        if stacked:
+            self._cal_months_shown = 1
 
         # === Calendar Grid (left) + Events (right) ===
         grid_x = 20
         grid_top = 30
+        col_w = 50
+        if stacked:
+            col_w = min(64, (card_w - 30) // 7)
+            grid_x = (card_w - 7 * col_w) // 2
+            grid_top = 45  # below the card's title
 
         # Month/Year header
         self.cal_month_year_label = lv.label(card)
@@ -2731,13 +2943,14 @@ class InfoHubDisplay:
         self.cal_month_year_label.set_pos(grid_x, grid_top)
 
         # Weekday headers
-        col_w = 50
-        for i, day in enumerate(DAY_NAMES):
+        for i, day in enumerate(DAY_NAMES.get(_LANGUAGE, DAY_NAMES["de"])):
             lbl = lv.label(card)
             lbl.set_text(day)
             lbl.set_style_text_color(lv.color_hex(THEME["text_secondary"]), 0)
             lbl.set_style_text_font(FONT[14], 0)
-            lbl.set_pos(grid_x + i * col_w + 15, grid_top + 35)
+            lbl.set_width(col_w)
+            lbl.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+            lbl.set_pos(grid_x + i * col_w, grid_top + 35)
 
         # Day grid cells (6 rows x 7 cols)
         self.cal_grid_cells = []
@@ -2753,7 +2966,7 @@ class InfoHubDisplay:
                 cell.set_style_bg_opa(0, 0)
                 cell.set_style_border_width(0, 0)
                 cell.set_style_pad_all(0, 0)
-                cell.set_style_radius(25, 0)
+                cell.set_style_radius(col_w // 2, 0)
                 cell.remove_flag(lv.obj.FLAG.SCROLLABLE)
                 cell.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
                 cell.add_flag(lv.obj.FLAG.CLICKABLE)
@@ -2795,13 +3008,15 @@ class InfoHubDisplay:
                 FONT[16], 0)
             self.cal_grid2_month_year_label.set_pos(grid_x, grid2_top)
 
-            for i, day in enumerate(DAY_NAMES):
+            for i, day in enumerate(DAY_NAMES.get(_LANGUAGE, DAY_NAMES["de"])):
                 lbl = lv.label(card)
                 lbl.set_text(day)
                 lbl.set_style_text_color(
                     lv.color_hex(THEME["text_secondary"]), 0)
                 lbl.set_style_text_font(FONT[14], 0)
-                lbl.set_pos(grid_x + i * col_w + 15, grid2_top + 35)
+                lbl.set_width(col_w)
+                lbl.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
+                lbl.set_pos(grid_x + i * col_w, grid2_top + 35)
 
             for row in range(6):
                 for col in range(7):
@@ -2846,9 +3061,18 @@ class InfoHubDisplay:
                         "obj": cell, "label": num_lbl, "dot": dot, "day": 0,
                     })
 
-        # === Event list (right of calendar grids) ===
+        # === Event list (right of calendar grids; stacked: below) ===
         evt_x = 390
         evt_top = grid_top
+        evt_step = 65
+        evt_max = 10
+        title_w = 310
+        if stacked:
+            evt_x = grid_x
+            evt_top = grid_top + 65 + 6 * col_w + 10
+            evt_step = 52
+            evt_max = max(1, (card_h - evt_top - 40) // evt_step)
+            title_w = card_w - evt_x - 30
 
         self.cal_event_header = lv.label(card)
         self.cal_event_header.set_text(_t("next_appointments"))
@@ -2857,10 +3081,14 @@ class InfoHubDisplay:
         self.cal_event_header.set_style_text_font(FONT[16], 0)
         self.cal_event_header.set_pos(evt_x, evt_top)
 
-        # Vertical separator between grids and events
+        # Separator between grids and events
         sep2 = lv.obj(card)
-        sep2.set_size(2, 740)
-        sep2.set_pos(375, grid_top)
+        if stacked:
+            sep2.set_size(card_w - 2 * evt_x, 2)
+            sep2.set_pos(evt_x, evt_top - 6)
+        else:
+            sep2.set_size(2, 740)
+            sep2.set_pos(375, grid_top)
         sep2.set_style_bg_color(lv.color_hex(0x4a4a6a), 0)
         sep2.set_style_bg_opa(80, 0)
         sep2.set_style_border_width(0, 0)
@@ -2868,11 +3096,10 @@ class InfoHubDisplay:
         sep2.remove_flag(lv.obj.FLAG.CLICKABLE)
 
         self.cal_event_items = []
-        evt_max = 10
         for i in range(evt_max):
-            item_y = evt_top + 40 + i * 65
+            item_y = evt_top + 40 + i * evt_step
             item = {}
-            bar = _draw_rect(card, evt_x, item_y + 5, 4, 50,
+            bar = _draw_rect(card, evt_x, item_y + 5, 4, evt_step - 15,
                              EVENT_COLORS[i % len(EVENT_COLORS)], 2)
             item["bar"] = bar
 
@@ -2888,8 +3115,10 @@ class InfoHubDisplay:
             title_lbl.set_text("")
             title_lbl.set_style_text_color(lv.color_hex(THEME["text"]), 0)
             title_lbl.set_style_text_font(FONT[16], 0)
-            title_lbl.set_pos(evt_x + 15, item_y + 28)
-            title_lbl.set_width(310)
+            title_lbl.set_pos(evt_x + 15, item_y + 24 if stacked else item_y + 28)
+            title_lbl.set_width(title_w)
+            if stacked:
+                title_lbl.set_long_mode(lv.label.LONG_MODE.DOTS)
             item["title"] = title_lbl
 
             bar.add_flag(lv.obj.FLAG.HIDDEN)
@@ -4351,6 +4580,8 @@ class InfoHubDisplay:
             # which language: redraw it in this one
             if self.status_label:
                 self.set_connected(self.connected)
+            if self.title_label:
+                self.title_label.set_text(_safe_text(layout_msg.get("title") or ""))
 
             self._delete_timer(self._scene_timer)
             self._scene_timer = None
@@ -4396,9 +4627,18 @@ class InfoHubDisplay:
             self._preview_waste_types = [None, None, None]
             self._forecast_conditions = [None] * 5
 
-            self._layout_screen_ids = [s.get("id") for s in screens]
+            # a screen can take several pages (see _plan_pages)
+            pages = []
+            for screen in screens:
+                planned = self._plan_pages(screen)
+                for n, placed in enumerate(planned):
+                    page_id = screen.get("id")
+                    if n:
+                        page_id = "%s#%d" % (page_id, n)
+                    pages.append((page_id, placed))
+            self._layout_screen_ids = [page_id for page_id, _ in pages]
 
-            for index, screen in enumerate(screens):
+            for index, (page_id, placed) in enumerate(pages):
                 container = lv.obj(self.scr)
                 container.set_size(DISPLAY_WIDTH, DISPLAY_HEIGHT)
                 container.set_pos(0, 0)
@@ -4411,13 +4651,13 @@ class InfoHubDisplay:
                 if index != 0:
                     container.add_flag(lv.obj.FLAG.HIDDEN)
 
-                self._build_screen_widgets(container, screen)
-                self._screen_containers[screen.get("id")] = container
+                self._build_screen_widgets(container, placed)
+                self._screen_containers[page_id] = container
 
             self._current_page = 0
 
-            if len(screens) > 1:
-                self._create_page_dots(len(screens))
+            if len(pages) > 1:
+                self._create_page_dots(len(pages))
                 self._setup_swipe_detection()
 
             if self.weather_card:
@@ -4454,18 +4694,58 @@ class InfoHubDisplay:
             except Exception:
                 pass
 
-    def _build_screen_widgets(self, container, screen):
-        """Creates cards for one screen's widgets, dispatched by widget type.
+    def _plan_pages(self, screen):
+        """Where one screen's widgets go: a list of pages, each a list of
+        (widget, x, y, w, h).
 
         The grid describes the content area *below* the always-visible
-        header (HEADER_HEIGHT), not the full screen.
+        header (HEADER_HEIGHT), not the full screen. On a compact
+        display the widgets are stacked instead: full width, column by
+        column (the grid's columns are how its author grouped them),
+        each COMPACT_HEIGHT tall, onto as many pages as they fill.
         """
-        grid = screen.get("grid", {})
-        grid_cols = grid.get("cols") or 1
-        grid_rows = grid.get("rows") or 1
-        cell_w = DISPLAY_WIDTH / grid_cols
-        cell_h = (DISPLAY_HEIGHT - HEADER_HEIGHT) / grid_rows
+        widgets = screen.get("widgets", [])
+        if not _is_compact():
+            grid = screen.get("grid", {})
+            cell_w = DISPLAY_WIDTH / (grid.get("cols") or 1)
+            cell_h = (DISPLAY_HEIGHT - HEADER_HEIGHT) / (grid.get("rows") or 1)
+            placed = []
+            for widget in widgets:
+                pos = widget.get("pos", {})
+                placed.append((
+                    widget,
+                    round(pos.get("col", 0) * cell_w),
+                    HEADER_HEIGHT + round(pos.get("row", 0) * cell_h),
+                    round(pos.get("colspan", 1) * cell_w),
+                    round(pos.get("rowspan", 1) * cell_h)))
+            return [placed]
 
+        def grid_order(widget):
+            pos = widget.get("pos", {})
+            return (pos.get("col", 0), pos.get("row", 0))
+
+        m = COMPACT_MARGIN
+        top = HEADER_HEIGHT + m
+        bottom = DISPLAY_HEIGHT - 40  # clear of the page dots
+        w = DISPLAY_WIDTH - 2 * m
+        pages, page, y = [], [], top
+        for widget in sorted(widgets, key=grid_order):
+            h = COMPACT_HEIGHT.get(widget.get("type")) or bottom - top
+            h = min(h, bottom - top)
+            if page and y + h > bottom:
+                pages.append(page)
+                page, y = [], top
+            page.append((widget, m, y, w, h))
+            y += h + m
+        if page or not pages:
+            pages.append(page)
+        return pages
+
+    def _build_screen_widgets(self, container, placed):
+        """Creates the cards for one page, dispatched by widget type.
+
+        `placed` is one page from _plan_pages().
+        """
         setup_by_type = {
             "clock": self._setup_clock_card,
             "weather_current": self._setup_weather_card,
@@ -4477,18 +4757,13 @@ class InfoHubDisplay:
             "switch_tile": self._setup_switch_tile_card,
         }
 
-        for widget in screen.get("widgets", []):
+        for widget, x, y, w, h in placed:
             widget_type = widget.get("type")
             setup_fn = setup_by_type.get(widget_type)
             if not setup_fn:
                 print("Unbekannter Widget-Typ:", widget_type)
                 continue
 
-            pos = widget.get("pos", {})
-            x = round(pos.get("col", 0) * cell_w)
-            y = HEADER_HEIGHT + round(pos.get("row", 0) * cell_h)
-            w = round(pos.get("colspan", 1) * cell_w)
-            h = round(pos.get("rowspan", 1) * cell_h)
             options = dict(widget.get("options") or {})
             # Kartengroesse mitgeben, statt sie in jedem _setup_*_card per
             # LVGL-Getter neu abzufragen - z.B. fuer die Uhr, die sich
@@ -4498,6 +4773,12 @@ class InfoHubDisplay:
 
             card = self._create_card(container, x, y, w, h, widget.get("label", ""))
             setup_fn(card, options)
+            native = NATIVE_SIZE.get(widget_type)
+            if native and (w < native[0] or h < native[1]):
+                fit = (min(1.0, w / native[0]), min(1.0, h / native[1]))
+                _fit_card(card, fit[0], fit[1])
+                if widget_type == "weather_current":
+                    self._scene_fit = fit
 
             if widget_type == "weather_current":
                 self.weather_card = card
