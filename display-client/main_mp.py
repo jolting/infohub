@@ -4609,7 +4609,16 @@ class InfoHubDisplay:
         elif control == "dimmer":
             row["label"].set_pos(15, row_y + 4)
             row["switch"]["track"].align(lv.ALIGN.TOP_RIGHT, -20, row_y)
-            slider_w = max(60, card_w - SWITCH_TOGGLE_W - 70)
+            # positions are inside the card's padding, so measure from its
+            # content width; stop a knob's width (~30) short of the switch
+            content_w = card_w
+            try:
+                card = row["slider"].get_parent()
+                content_w -= card.get_style_pad_left(lv.PART.MAIN) + card.get_style_pad_right(lv.PART.MAIN)
+            except Exception:
+                content_w -= 40
+            switch_x = content_w - 20 - SWITCH_TOGGLE_W
+            slider_w = max(60, switch_x - 20 - 30)
             row["slider"].set_size(slider_w, 18)
             row["slider"].set_pos(20, row_y + SWITCH_TOGGLE_H - 26)
             # the label's band toggles; the slider's doesn't
